@@ -1,0 +1,170 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
+      MONGODB_CLIENTS_COLLECTION: clients
+      MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
+      MONGODB_PROCESS_DOMAIN_TASKS_COLLECTION: process_domain_tasks
+      MONGODB_SELENIUM_NODES_COLLECTION: selenium_nodes
+      MONGODB_SELENIUM_SESSION_SLOTS_COLLECTION: selenium_session_slots
+      SELENIUM_GRID_URLS: http://selenium_1:4444/wd/hub,http://selenium_2:4444/wd/hub
+      MAX_SESSIONS_PER_SELENIUM: ${MAX_SESSIONS_PER_SELENIUM:-10}
+      CLIENT_REGISTRATION_PASSWORD: ${CLIENT_REGISTRATION_PASSWORD:-change-me}
+    volumes:
+      - ./logs:/app/logs
+    ports:
+      - "${API_PORT:-8110}:8110"
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8110/health', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
+      MONGODB_CLIENTS_COLLECTION: clients
+      MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
+      MONGODB_PROCESS_DOMAIN_TASKS_COLLECTION: process_domain_tasks
+      MONGODB_SELENIUM_NODES_COLLECTION: selenium_nodes
+      MONGODB_SELENIUM_SESSION_SLOTS_COLLECTION: selenium_session_slots
+      SELENIUM_GRID_URLS: http://selenium_1:4444/wd/hub,http://selenium_2:4444/wd/hub
+      TASK_MAX_ATTEMPTS: ${TASK_MAX_ATTEMPTS:-3}
+      HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-30}
+      MAX_SESSIONS_PER_SELENIUM: ${MAX_SESSIONS_PER_SELENIUM:-10}
+    volumes:
+      - ./logs:/app/logs
+    command: celery -A infrastructure.celery_app worker --loglevel=info --concurrency=1 --queues=processes --hostname=worker@%h
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+      selenium_1:
+        condition: service_started
+      selenium_2:
+        condition: service_started
+    restart: unless-stopped
+    stop_grace_period: 300s
+
+  watchdog:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
+      MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
+      MONGODB_PROCESS_DOMAIN_TASKS_COLLECTION: process_domain_tasks
+      MONGODB_SELENIUM_NODES_COLLECTION: selenium_nodes
+      MONGODB_SELENIUM_SESSION_SLOTS_COLLECTION: selenium_session_slots
+      SELENIUM_GRID_URLS: http://selenium_1:4444/wd/hub,http://selenium_2:4444/wd/hub
+      MAX_SESSIONS_PER_SELENIUM: ${MAX_SESSIONS_PER_SELENIUM:-10}
+      STALE_TASK_SECONDS: ${STALE_TASK_SECONDS:-300}
+      WATCHDOG_INTERVAL_SECONDS: ${WATCHDOG_INTERVAL_SECONDS:-60}
+      TASK_MAX_ATTEMPTS: ${TASK_MAX_ATTEMPTS:-3}
+    command: python -m infrastructure.watchdog
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+    restart: unless-stopped
+
+  selenium_1:
+    image: selenium/standalone-chromium:latest
+    shm_size: "${CHROME_SHM_SIZE:-2g}"
+    environment:
+      SE_NODE_MAX_SESSIONS: ${MAX_SESSIONS_PER_SELENIUM:-10}
+      SE_NODE_OVERRIDE_MAX_SESSIONS: "true"
+      SE_NODE_SESSION_TIMEOUT: ${SE_NODE_SESSION_TIMEOUT:-900}
+      SE_BROWSER_ARGS_DISABLE_DSHM: --disable-dev-shm-usage
+      SE_BROWSER_ARGS_NO_SANDBOX: --no-sandbox
+    ports:
+      - "4441:4444"
+    restart: unless-stopped
+
+  selenium_2:
+    image: selenium/standalone-chromium:latest
+    shm_size: "${CHROME_SHM_SIZE:-2g}"
+    environment:
+      SE_NODE_MAX_SESSIONS: ${MAX_SESSIONS_PER_SELENIUM:-10}
+      SE_NODE_OVERRIDE_MAX_SESSIONS: "true"
+      SE_NODE_SESSION_TIMEOUT: ${SE_NODE_SESSION_TIMEOUT:-900}
+      SE_BROWSER_ARGS_DISABLE_DSHM: --disable-dev-shm-usage
+      SE_BROWSER_ARGS_NO_SANDBOX: --no-sandbox
+    ports:
+      - "4442:4444"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-secret}
+    volumes:
+      - ./mongo-data:/data/db
+      - ./mongod.conf:/etc/mongod.conf:ro
+    restart: unless-stopped
+
+  mongo-express:
+    image: mongo-express:latest
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: ${MONGO_ROOT_USERNAME:-admin}
+      ME_CONFIG_MONGODB_ADMINPASSWORD: ${MONGO_ROOT_PASSWORD:-secret}
+      ME_CONFIG_MONGODB_URL: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017/
+      ME_CONFIG_BASICAUTH_USERNAME: ${MONGO_EXPRESS_USERNAME:-admin}
+      ME_CONFIG_BASICAUTH_PASSWORD: ${MONGO_EXPRESS_PASSWORD:-secret}
+      ME_CONFIG_SITE_BASEURL: /ats/mongo
+    depends_on:
+      mongo:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  mongo-data:
+  redis-data:

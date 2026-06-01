@@ -1,0 +1,902 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin | Job Monitoring Agent</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f8fb;
+      --panel: #ffffff;
+      --ink: #152033;
+      --muted: #647084;
+      --line: #dbe2ea;
+      --accent: #176b87;
+      --accent-strong: #0f5369;
+      --danger: #b42318;
+      --danger-bg: #fff0ee;
+      --ok: #087443;
+      --ok-bg: #edfdf5;
+      --shadow: 0 10px 30px rgba(21, 32, 51, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+
+    button,
+    input,
+    textarea {
+      font: inherit;
+    }
+
+    button {
+      border: 0;
+      border-radius: 6px;
+      cursor: pointer;
+      min-height: 40px;
+      padding: 0 14px;
+      font-weight: 700;
+      transition: transform 120ms ease, background 120ms ease, border-color 120ms ease;
+    }
+
+    button:active {
+      transform: translateY(1px);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.58;
+    }
+
+    label {
+      color: var(--muted);
+      display: grid;
+      font-size: 13px;
+      font-weight: 700;
+      gap: 7px;
+    }
+
+    input,
+    textarea {
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--ink);
+      min-height: 42px;
+      outline: none;
+      padding: 10px 12px;
+      width: 100%;
+    }
+
+    textarea {
+      min-height: 92px;
+      resize: vertical;
+    }
+
+    input:focus,
+    textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(23, 107, 135, 0.14);
+    }
+
+    .shell {
+      margin: 0 auto;
+      max-width: 1180px;
+      padding: 28px 20px 44px;
+    }
+
+    .topbar {
+      align-items: center;
+      display: flex;
+      gap: 18px;
+      justify-content: space-between;
+      margin-bottom: 22px;
+    }
+
+    .title h1 {
+      font-size: clamp(26px, 4vw, 38px);
+      line-height: 1.1;
+      margin: 0 0 6px;
+    }
+
+    .title p {
+      color: var(--muted);
+      margin: 0;
+      max-width: 680px;
+    }
+
+    .status {
+      align-items: center;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--muted);
+      display: flex;
+      gap: 8px;
+      min-height: 40px;
+      padding: 0 12px;
+      white-space: nowrap;
+    }
+
+    .status-dot {
+      background: #9aa6b2;
+      border-radius: 999px;
+      height: 9px;
+      width: 9px;
+    }
+
+    .status.ok .status-dot {
+      background: var(--ok);
+    }
+
+    .status.bad .status-dot {
+      background: var(--danger);
+    }
+
+    .layout {
+      align-items: start;
+      display: grid;
+      gap: 18px;
+      grid-template-columns: minmax(310px, 410px) 1fr;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 18px;
+    }
+
+    .wide {
+      grid-column: 1 / -1;
+    }
+
+    .panel h2 {
+      font-size: 18px;
+      line-height: 1.2;
+      margin: 0 0 16px;
+    }
+
+    .auth-grid,
+    .form-grid {
+      display: grid;
+      gap: 14px;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .primary {
+      background: var(--accent);
+      color: #ffffff;
+    }
+
+    .primary:hover {
+      background: var(--accent-strong);
+    }
+
+    .secondary {
+      background: #eef3f7;
+      color: var(--ink);
+    }
+
+    .danger {
+      background: var(--danger-bg);
+      color: var(--danger);
+    }
+
+    .toolbar {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+
+    .toolbar h2 {
+      margin: 0;
+    }
+
+    .client-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .client-card {
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+    }
+
+    .client-card header {
+      align-items: start;
+      display: flex;
+      gap: 12px;
+      justify-content: space-between;
+    }
+
+    .client-name {
+      font-size: 17px;
+      font-weight: 800;
+      overflow-wrap: anywhere;
+    }
+
+    .meta {
+      color: var(--muted);
+      display: flex;
+      flex-wrap: wrap;
+      font-size: 13px;
+      gap: 8px 14px;
+      margin-top: 5px;
+    }
+
+    .emails {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .chip {
+      background: #eef3f7;
+      border-radius: 999px;
+      color: #405064;
+      font-size: 12px;
+      font-weight: 700;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      padding: 5px 8px;
+    }
+
+    .chip.ok {
+      background: var(--ok-bg);
+      color: var(--ok);
+    }
+
+    .chip.bad {
+      background: var(--danger-bg);
+      color: var(--danger);
+    }
+
+    .result-list {
+      border-top: 1px solid var(--line);
+      display: grid;
+      gap: 8px;
+      padding-top: 10px;
+    }
+
+    .result-row {
+      align-items: start;
+      display: grid;
+      gap: 4px;
+    }
+
+    .result-title {
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 800;
+      overflow-wrap: anywhere;
+    }
+
+    .result-url {
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .empty {
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      padding: 22px;
+      text-align: center;
+    }
+
+    .notice {
+      border-radius: 6px;
+      display: none;
+      font-weight: 700;
+      margin-bottom: 14px;
+      padding: 11px 12px;
+    }
+
+    .notice.show {
+      display: block;
+    }
+
+    .notice.ok {
+      background: var(--ok-bg);
+      color: var(--ok);
+    }
+
+    .notice.bad {
+      background: var(--danger-bg);
+      color: var(--danger);
+    }
+
+    @media (max-width: 820px) {
+      .topbar,
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .topbar {
+        align-items: stretch;
+        display: grid;
+      }
+
+      .status {
+        justify-content: center;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="topbar">
+      <div class="title">
+        <h1>Admin clients</h1>
+        <p>Create and manage client API settings used by the processing nodes.</p>
+      </div>
+      <div class="status" id="apiStatus">
+        <span class="status-dot"></span>
+        <span id="apiStatusText">Checking API</span>
+      </div>
+    </section>
+
+    <section class="layout">
+      <div class="panel">
+        <h2>Admin access</h2>
+        <div class="auth-grid">
+          <label>
+            Registration password
+            <input id="passwordInput" type="password" autocomplete="current-password" placeholder="CLIENT_REGISTRATION_PASSWORD">
+          </label>
+          <div class="actions">
+            <button class="primary" id="savePasswordButton" type="button">Save</button>
+            <button class="secondary" id="clearPasswordButton" type="button">Clear</button>
+          </div>
+        </div>
+
+        <hr style="border: 0; border-top: 1px solid var(--line); margin: 18px 0;">
+
+        <h2 id="formTitle">Create client</h2>
+        <div class="notice" id="notice"></div>
+        <form id="clientForm" class="form-grid">
+          <label>
+            Client name
+            <input id="clientNameInput" name="client_name" required autocomplete="off" placeholder="acme">
+          </label>
+          <label>
+            Result emails
+            <textarea id="emailInput" name="email" placeholder="ops@acme.com, founders@acme.com"></textarea>
+          </label>
+          <label>
+            API key
+            <input id="apiKeyInput" name="api_key" required autocomplete="off" placeholder="sk-...">
+          </label>
+          <label>
+            Model
+            <input id="modelInput" name="model" required autocomplete="off" value="gpt-5-nano">
+          </label>
+          <div class="actions">
+            <button class="primary" id="submitButton" type="submit">Create client</button>
+            <button class="secondary" id="resetButton" type="button">Reset</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="panel">
+        <div class="toolbar">
+          <h2>Clients</h2>
+          <button class="secondary" id="refreshButton" type="button">Refresh</button>
+        </div>
+        <div id="clientList" class="client-list">
+          <div class="empty">Loading clients...</div>
+        </div>
+      </div>
+
+      <div class="panel wide">
+        <div class="toolbar">
+          <h2>Process uploads</h2>
+          <button class="secondary" id="refreshProcessesButton" type="button">Refresh</button>
+        </div>
+        <form id="uploadForm" class="form-grid">
+          <label>
+            Client name
+            <input id="uploadClientNameInput" required autocomplete="off" placeholder="acme">
+          </label>
+          <label>
+            Agent count
+            <input id="agentCountInput" required min="1" type="number" value="1">
+          </label>
+          <label>
+            CSV or XLSX file
+            <input id="processFileInput" required type="file" accept=".csv,.xlsx">
+          </label>
+          <div class="actions">
+            <button class="primary" id="uploadButton" type="submit">Create process</button>
+          </div>
+        </form>
+        <div id="processList" class="client-list" style="margin-top: 16px;">
+          <div class="empty">No process uploads loaded.</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      editingClientName: null,
+      clients: [],
+    };
+
+    const elements = {
+      apiStatus: document.querySelector("#apiStatus"),
+      apiStatusText: document.querySelector("#apiStatusText"),
+      notice: document.querySelector("#notice"),
+      passwordInput: document.querySelector("#passwordInput"),
+      savePasswordButton: document.querySelector("#savePasswordButton"),
+      clearPasswordButton: document.querySelector("#clearPasswordButton"),
+      clientForm: document.querySelector("#clientForm"),
+      formTitle: document.querySelector("#formTitle"),
+      clientNameInput: document.querySelector("#clientNameInput"),
+      emailInput: document.querySelector("#emailInput"),
+      apiKeyInput: document.querySelector("#apiKeyInput"),
+      modelInput: document.querySelector("#modelInput"),
+      submitButton: document.querySelector("#submitButton"),
+      resetButton: document.querySelector("#resetButton"),
+      refreshButton: document.querySelector("#refreshButton"),
+      clientList: document.querySelector("#clientList"),
+      uploadForm: document.querySelector("#uploadForm"),
+      uploadClientNameInput: document.querySelector("#uploadClientNameInput"),
+      agentCountInput: document.querySelector("#agentCountInput"),
+      processFileInput: document.querySelector("#processFileInput"),
+      uploadButton: document.querySelector("#uploadButton"),
+      refreshProcessesButton: document.querySelector("#refreshProcessesButton"),
+      processList: document.querySelector("#processList"),
+    };
+
+    function getPassword() {
+      return elements.passwordInput.value.trim();
+    }
+
+    function headers() {
+      return {
+        "Content-Type": "application/json",
+        "x-registration-password": getPassword(),
+      };
+    }
+
+    function parseEmails(value) {
+      return value
+        .split(/[\n,;]/)
+        .map((email) => email.trim())
+        .filter(Boolean);
+    }
+
+    function showNotice(message, type = "ok") {
+      elements.notice.textContent = message;
+      elements.notice.className = `notice show ${type}`;
+    }
+
+    function clearNotice() {
+      elements.notice.textContent = "";
+      elements.notice.className = "notice";
+    }
+
+    function setApiStatus(message, type) {
+      elements.apiStatusText.textContent = message;
+      elements.apiStatus.className = `status ${type || ""}`.trim();
+    }
+
+    async function request(path, options = {}) {
+      const isFormData = options.body instanceof FormData;
+      const response = await fetch(path, {
+        ...options,
+        headers: {
+          ...(isFormData ? uploadHeaders() : headers()),
+          ...(options.headers || {}),
+        },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.detail || "Request failed");
+      }
+      return data;
+    }
+
+    function uploadHeaders() {
+      return {
+        "x-registration-password": getPassword(),
+      };
+    }
+
+    async function checkHealth() {
+      try {
+        await fetch("/health");
+        setApiStatus("API online", "ok");
+      } catch (error) {
+        setApiStatus("API offline", "bad");
+      }
+    }
+
+    async function loadClients() {
+      if (!getPassword()) {
+        elements.clientList.innerHTML = '<div class="empty">Enter the admin password to load clients.</div>';
+        elements.processList.innerHTML = '<div class="empty">Enter the admin password to load processes.</div>';
+        return;
+      }
+
+      elements.refreshButton.disabled = true;
+      try {
+        const data = await request("/clients");
+        state.clients = data.clients || [];
+        renderClients();
+        clearNotice();
+      } catch (error) {
+        elements.clientList.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
+        showNotice(error.message, "bad");
+      } finally {
+        elements.refreshButton.disabled = false;
+      }
+    }
+
+    async function loadProcesses() {
+      if (!getPassword()) {
+        elements.processList.innerHTML = '<div class="empty">Enter the admin password to load processes.</div>';
+        return;
+      }
+
+      elements.refreshProcessesButton.disabled = true;
+      try {
+        const data = await request("/processes");
+        renderProcesses(data.processes || []);
+      } catch (error) {
+        elements.processList.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
+      } finally {
+        elements.refreshProcessesButton.disabled = false;
+      }
+    }
+
+    function renderProcesses(processes) {
+      if (!processes.length) {
+        elements.processList.innerHTML = '<div class="empty">No process uploads created yet.</div>';
+        return;
+      }
+
+      elements.processList.innerHTML = processes.map(renderProcessCard).join("");
+    }
+
+    function renderProcessCard(process) {
+      const stats = processLoadStats(process);
+      return `
+        <article class="client-card">
+          <header>
+            <div>
+              <div class="client-name">${escapeHtml(process.process_id)}</div>
+              <div class="meta">
+                <span>Client: ${escapeHtml(process.client?.client_name || "")}</span>
+                <span>Status: ${escapeHtml(process.status || "")}</span>
+                <span>Agents: ${escapeHtml(process.agent_count || "")}</span>
+                <span>Domains: ${escapeHtml(process.totals?.domains || 0)}</span>
+              </div>
+            </div>
+            <div class="actions" style="margin-top: 0;">
+              <button class="primary" type="button" data-action="start-process" data-process="${escapeAttr(process.process_id)}">Start</button>
+            </div>
+          </header>
+          <div class="emails">
+            <span class="chip">${escapeHtml(process.source_file?.filename || "upload")}</span>
+            <span class="chip">${escapeHtml(process.totals?.supplied_career_urls || 0)} career URLs supplied</span>
+            <span class="chip ok">${stats.loaded} loaded</span>
+            <span class="chip bad">${stats.failed} failed</span>
+            <span class="chip">${stats.rate}% success</span>
+          </div>
+          ${renderCompletedResults(process)}
+        </article>
+      `;
+    }
+
+    function processLoadStats(process) {
+      const completed = completedDomains(process);
+      const loaded = completed.filter((item) => isLoadedResult(item.result)).length;
+      const failed = completed.filter((item) => isFailedResult(item.result)).length;
+      const total = loaded + failed;
+      return {
+        loaded,
+        failed,
+        rate: total ? Math.round((loaded / total) * 100) : 0,
+      };
+    }
+
+    function isLoadedResult(result) {
+      if (!result) {
+        return false;
+      }
+      if (typeof result.load_success === "boolean") {
+        return result.load_success;
+      }
+      return !result.load_error;
+    }
+
+    function isFailedResult(result) {
+      if (!result) {
+        return false;
+      }
+      return !isLoadedResult(result);
+    }
+
+    function completedDomains(process) {
+      return process.domains?.completed || [];
+    }
+
+    function renderCompletedResults(process) {
+      const completed = completedDomains(process).slice(-5).reverse();
+      if (!completed.length) {
+        return "";
+      }
+      return `
+        <div class="result-list">
+          ${completed.map(renderCompletedResult).join("")}
+        </div>
+      `;
+    }
+
+    function renderCompletedResult(item) {
+      const result = item.result || {};
+      const loaded = isLoadedResult(result);
+      const title = result.page_title || "No page title captured";
+      const url = result.final_url || result.target_url || item.domain || "";
+      return `
+        <div class="result-row">
+          <div class="emails">
+            <span class="chip ${loaded ? "ok" : "bad"}">${loaded ? "loaded" : "failed"}</span>
+            <span class="chip">${escapeHtml(item.registered_domain || "")}</span>
+          </div>
+          <div class="result-title">${escapeHtml(title)}</div>
+          <div class="result-url">${escapeHtml(url)}</div>
+        </div>
+      `;
+    }
+
+    function renderClients() {
+      if (!state.clients.length) {
+        elements.clientList.innerHTML = '<div class="empty">No clients created yet.</div>';
+        return;
+      }
+
+      elements.clientList.innerHTML = state.clients.map((client) => {
+        const emails = (client.email || []).map((email) => `<span class="chip">${escapeHtml(email)}</span>`).join("");
+        return `
+          <article class="client-card">
+            <header>
+              <div>
+                <div class="client-name">${escapeHtml(client.client_name || "")}</div>
+                <div class="meta">
+                  <span>Model: ${escapeHtml(client.model || "")}</span>
+                  <span>Key: ${escapeHtml(client.api_key_preview || "***")}</span>
+                </div>
+              </div>
+              <div class="actions" style="margin-top: 0;">
+                <button class="secondary" type="button" data-action="edit" data-client="${escapeAttr(client.client_name)}">Edit</button>
+                <button class="danger" type="button" data-action="delete" data-client="${escapeAttr(client.client_name)}">Delete</button>
+              </div>
+            </header>
+            <div class="emails">${emails || '<span class="chip">No result emails</span>'}</div>
+          </article>
+        `;
+      }).join("");
+    }
+
+    function resetForm() {
+      state.editingClientName = null;
+      elements.formTitle.textContent = "Create client";
+      elements.submitButton.textContent = "Create client";
+      elements.apiKeyInput.required = true;
+      elements.apiKeyInput.placeholder = "sk-...";
+      elements.clientForm.reset();
+      elements.modelInput.value = "gpt-5-nano";
+      clearNotice();
+    }
+
+    function editClient(clientName) {
+      const client = state.clients.find((item) => item.client_name === clientName);
+      if (!client) {
+        return;
+      }
+      state.editingClientName = client.client_name;
+      elements.formTitle.textContent = `Edit ${client.client_name}`;
+      elements.submitButton.textContent = "Update client";
+      elements.clientNameInput.value = client.client_name || "";
+      elements.emailInput.value = (client.email || []).join(", ");
+      elements.apiKeyInput.value = "";
+      elements.apiKeyInput.placeholder = "Leave blank to keep current key";
+      elements.apiKeyInput.required = false;
+      elements.modelInput.value = client.model || "gpt-5-nano";
+      clearNotice();
+      elements.clientNameInput.focus();
+    }
+
+    async function deleteClient(clientName) {
+      const confirmed = window.confirm(`Delete client "${clientName}"?`);
+      if (!confirmed) {
+        return;
+      }
+      try {
+        await request(`/clients/${encodeURIComponent(clientName)}`, { method: "DELETE" });
+        showNotice("Client deleted.");
+        await loadClients();
+        if (state.editingClientName === clientName) {
+          resetForm();
+        }
+      } catch (error) {
+        showNotice(error.message, "bad");
+      }
+    }
+
+    async function submitForm(event) {
+      event.preventDefault();
+      if (!getPassword()) {
+        showNotice("Enter the admin password first.", "bad");
+        return;
+      }
+
+      const body = {
+        client_name: elements.clientNameInput.value.trim(),
+        email: parseEmails(elements.emailInput.value),
+        model: elements.modelInput.value.trim(),
+      };
+
+      const apiKey = elements.apiKeyInput.value.trim();
+      if (!state.editingClientName || apiKey) {
+        body.api_key = apiKey;
+      }
+
+      elements.submitButton.disabled = true;
+      try {
+        if (state.editingClientName) {
+          await request(`/clients/${encodeURIComponent(state.editingClientName)}`, {
+            method: "PATCH",
+            body: JSON.stringify(body),
+          });
+          showNotice("Client updated.");
+        } else {
+          await request("/clients", {
+            method: "POST",
+            body: JSON.stringify(body),
+          });
+          showNotice("Client created.");
+        }
+        resetForm();
+        await loadClients();
+      } catch (error) {
+        showNotice(error.message, "bad");
+      } finally {
+        elements.submitButton.disabled = false;
+      }
+    }
+
+    async function uploadProcessFile(event) {
+      event.preventDefault();
+      if (!getPassword()) {
+        showNotice("Enter the admin password first.", "bad");
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append("client_name", elements.uploadClientNameInput.value.trim());
+      formData.append("agent_count", elements.agentCountInput.value);
+      formData.append("upload_file", elements.processFileInput.files[0]);
+
+      elements.uploadButton.disabled = true;
+      try {
+        const data = await request("/processes/upload", {
+          method: "POST",
+          body: formData,
+        });
+        elements.uploadForm.reset();
+        elements.agentCountInput.value = "1";
+        showNotice(`Process created: ${data.process.process_id}`);
+        await loadProcesses();
+      } catch (error) {
+        showNotice(error.message, "bad");
+      } finally {
+        elements.uploadButton.disabled = false;
+      }
+    }
+
+    async function startProcess(processId) {
+      try {
+        const data = await request(`/processes/${encodeURIComponent(processId)}/start`, {
+          method: "POST",
+        });
+        showNotice(`Process started: ${data.enqueued} domain tasks queued.`);
+        await loadProcesses();
+      } catch (error) {
+        showNotice(error.message, "bad");
+      }
+    }
+
+    function savePassword() {
+      localStorage.setItem("admin_registration_password", getPassword());
+      showNotice("Password saved in this browser.");
+      loadClients();
+      loadProcesses();
+    }
+
+    function clearPassword() {
+      localStorage.removeItem("admin_registration_password");
+      elements.passwordInput.value = "";
+      resetForm();
+      loadClients();
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, (character) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#039;",
+      }[character]));
+    }
+
+    function escapeAttr(value) {
+      return escapeHtml(value).replace(/`/g, "&#096;");
+    }
+
+    elements.clientForm.addEventListener("submit", submitForm);
+    elements.uploadForm.addEventListener("submit", uploadProcessFile);
+    elements.resetButton.addEventListener("click", resetForm);
+    elements.refreshButton.addEventListener("click", loadClients);
+    elements.refreshProcessesButton.addEventListener("click", loadProcesses);
+    elements.savePasswordButton.addEventListener("click", savePassword);
+    elements.clearPasswordButton.addEventListener("click", clearPassword);
+    elements.clientList.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-action]");
+      if (!button) {
+        return;
+      }
+      const clientName = button.dataset.client;
+      if (button.dataset.action === "edit") {
+        editClient(clientName);
+      }
+      if (button.dataset.action === "delete") {
+        deleteClient(clientName);
+      }
+    });
+    elements.processList.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-action='start-process']");
+      if (!button) {
+        return;
+      }
+      startProcess(button.dataset.process);
+    });
+
+    elements.passwordInput.value = localStorage.getItem("admin_registration_password") || "";
+    checkHealth();
+    loadClients();
+    loadProcesses();
+  </script>
+</body>
+</html>
