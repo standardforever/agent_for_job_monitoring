@@ -87,7 +87,12 @@ Never pick a `mailto:` link from the selector map as a navigation target.
 
 ## JOBS LISTED ON PAGE (when page_category = `jobs_listed`)
 
-For each job extract:
+Do NOT return every job on the page. Return a maximum of 2 sample jobs only:
+- If there is 1 job, return that 1 job.
+- If there are 2 jobs, return both.
+- If there are more than 2 jobs, return only the first visible job and the last visible job.
+
+For each sampled job extract:
 - `title` — job title
 - `job_url` — full resolved URL or {url} as fallback, never null
 

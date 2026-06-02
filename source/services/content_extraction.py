@@ -10,9 +10,8 @@ except Exception:  # pragma: no cover - handled gracefully at runtime
     Page = None
     PlaywrightTimeoutError = TimeoutError
 
-from js_helper.page_extraction import page_extraction
 from utils.logging import get_logger, log_event
-from schemas.agent_state import ExtractedPageContent
+from js_helper.page_extraction import page_extraction
 
 logger = get_logger("content_extraction")
 

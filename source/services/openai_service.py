@@ -79,7 +79,8 @@ async def validate_openai_api_key(
 def _validate_openai_api_key_sync(api_key: str, model: str) -> APIKeyValidationResult:
     try:
         client = OpenAI(api_key=api_key)
-        client.responses.create(
+        create_openai_text_response(
+            client=client,
             model=model,
             input="ping",
             max_output_tokens=16,
@@ -124,6 +125,119 @@ def _summarize_api_key_validation_error(error: str) -> str:
     return "The OpenAI API key could not be validated. Please confirm the key and model, then try again."
 
 
+def create_openai_text_response(
+    *,
+    client: OpenAI,
+    model: str,
+    input: Any,
+    json_response: bool = False,
+    json_schema: dict[str, Any] | None = None,
+    max_output_tokens: int | None = None,
+) -> tuple[str, dict[str, int]]:
+    if hasattr(client, "responses"):
+        return _create_responses_text(
+            client=client,
+            model=model,
+            input=input,
+            json_schema=json_schema,
+            max_output_tokens=max_output_tokens,
+        )
+    return _create_chat_text(
+        client=client,
+        model=model,
+        input=input,
+        json_response=json_response or bool(json_schema),
+        json_schema=json_schema,
+        max_output_tokens=max_output_tokens,
+    )
+
+
+def _create_responses_text(
+    *,
+    client: OpenAI,
+    model: str,
+    input: Any,
+    json_schema: dict[str, Any] | None,
+    max_output_tokens: int | None,
+) -> tuple[str, dict[str, int]]:
+    kwargs: dict[str, Any] = {"model": model, "input": input}
+    if max_output_tokens is not None:
+        kwargs["max_output_tokens"] = max_output_tokens
+    if json_schema:
+        kwargs["text"] = {
+            "format": {
+                "type": "json_schema",
+                "name": json_schema["name"],
+                "schema": json_schema["schema"],
+                "strict": bool(json_schema.get("strict", True)),
+            }
+        }
+    response = client.responses.create(**kwargs)
+    return str(response.output_text or ""), _response_usage(response.usage)
+
+
+def _create_chat_text(
+    *,
+    client: OpenAI,
+    model: str,
+    input: Any,
+    json_response: bool,
+    json_schema: dict[str, Any] | None,
+    max_output_tokens: int | None,
+) -> tuple[str, dict[str, int]]:
+    kwargs: dict[str, Any] = {"model": model, "messages": _chat_messages(input)}
+    if max_output_tokens is not None:
+        kwargs["max_tokens"] = max_output_tokens
+    if json_schema:
+        kwargs["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": json_schema["name"],
+                "schema": json_schema["schema"],
+                "strict": bool(json_schema.get("strict", True)),
+            },
+        }
+    elif json_response:
+        kwargs["response_format"] = {"type": "json_object"}
+    response = client.chat.completions.create(**kwargs)
+    choice = response.choices[0] if response.choices else None
+    message = choice.message if choice else None
+    return str(getattr(message, "content", "") or ""), _chat_usage(response.usage)
+
+
+def _chat_messages(input: Any) -> list[dict[str, str]]:
+    if isinstance(input, str):
+        return [{"role": "user", "content": input}]
+    messages = []
+    for item in input or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "user")
+        content = str(item.get("content") or "")
+        messages.append({"role": role, "content": content})
+    return messages or [{"role": "user", "content": str(input or "")}]
+
+
+def _response_usage(usage: Any) -> dict[str, int]:
+    if not usage:
+        return {}
+    return {
+        "input_token": int(getattr(usage, "input_tokens", 0) or 0),
+        "output_token": int(getattr(usage, "output_tokens", 0) or 0),
+        "total_token": int(getattr(usage, "total_tokens", 0) or 0),
+    }
+
+
+def _chat_usage(usage: Any) -> dict[str, int]:
+    if not usage:
+        return {}
+    return {
+        "input_token": int(getattr(usage, "prompt_tokens", 0) or 0),
+        "output_token": int(getattr(usage, "completion_tokens", 0) or 0),
+        "total_token": int(getattr(usage, "total_tokens", 0) or 0),
+    }
+
+
 class OpenAIAnalysisService:
     def __init__(self, model: str | None = None, api_key: str | None = None) -> None:
         self._model = resolve_openai_model(model)
@@ -162,22 +276,16 @@ class OpenAIAnalysisService:
         error = ""
         for attempt in range(1, 3):
             try:
-                response = self._client.responses.create(
+                output_text, token_usage = create_openai_text_response(
+                    client=self._client,
                     model=self._model,
                     input=prompt,
+                    json_response=json_response,
                 )
-                output: Any = response.output_text
+                output: Any = output_text
 
                 if json_response:
                     output = json.loads(output)
-                
-                token_usage = {}
-                if response.usage:
-                    token_usage = {
-                        "input_token": response.usage.input_tokens,
-                        "output_token": response.usage.output_tokens,
-                        "total_token": response.usage.total_tokens
-                    }
                 log_event(
                     logger,
                     "info",

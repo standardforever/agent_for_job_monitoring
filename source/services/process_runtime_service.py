@@ -34,6 +34,18 @@ class ProcessRuntimeService:
         self._mark_process_running(process_id)
         return self.dispatchable_refs(process_id)
 
+    def start_or_restart_search_process(self, process_id: str) -> dict[str, Any]:
+        self._repair_legacy_process_shape(process_id)
+        self.requeue_stale_processing(process_id)
+        process = self._load_process(process_id)
+        mode = self._search_start_mode(process)
+        if mode == "blocked":
+            raise RuntimeError("Process is already queued or running")
+        if mode == "rerun":
+            self._reset_terminal_process(process_id, process)
+        refs = self.start_process(process_id)
+        return {"mode": mode, "refs": refs}
+
     def dispatchable_refs(self, process_id: str) -> list[dict[str, Any]]:
         process = self._load_process(process_id)
         if process.get("status") != "running":
@@ -109,6 +121,51 @@ class ProcessRuntimeService:
     def _queued_refs(self, process: dict[str, Any]) -> list[dict[str, Any]]:
         return list(process.get("domains", {}).get("queued", []) or [])
 
+    def _search_start_mode(self, process: dict[str, Any]) -> str:
+        totals = process.get("totals", {})
+        if self._has_active_process(process, totals):
+            return "blocked"
+        if self._has_terminal_domains(totals):
+            return "rerun"
+        return "start"
+
+    def _has_active_process(self, process: dict[str, Any], totals: dict[str, Any]) -> bool:
+        if int(totals.get("processing") or 0) > 0:
+            return True
+        if process.get("status") == "running" and int(totals.get("queued") or 0) > 0:
+            return True
+        return int(totals.get("queued") or 0) > 0 and self._has_terminal_domains(totals)
+
+    def _has_terminal_domains(self, totals: dict[str, Any]) -> bool:
+        return int(totals.get("completed") or 0) > 0 or int(totals.get("failed") or 0) > 0
+
+    def _reset_terminal_process(self, process_id: str, process: dict[str, Any]) -> None:
+        queued = self._terminal_refs(process)
+        self._processes.update_one(
+            {"process_id": process_id},
+            {
+                "$set": {
+                    "status": "queued",
+                    "domains": {"queued": queued, "processing": [], "completed": [], "failed": []},
+                    "totals": self._totals_from_domains(
+                        {"queued": queued, "processing": [], "completed": [], "failed": []}
+                    ),
+                    "updated_at": _now(),
+                }
+            },
+        )
+
+    def _terminal_refs(self, process: dict[str, Any]) -> list[dict[str, Any]]:
+        domains = process.get("domains", {})
+        refs = list(domains.get("completed", []) or []) + list(domains.get("failed", []) or [])
+        return [self._clean_terminal_ref(ref) for ref in refs]
+
+    def _clean_terminal_ref(self, ref: dict[str, Any]) -> dict[str, Any]:
+        cleaned = self._clean_runtime_ref(ref)
+        for key in ("result", "reused", "completed_at", "error", "failed_at", "last_requeue_reason"):
+            cleaned.pop(key, None)
+        return cleaned
+
     def _available_process_capacity(self, process: dict[str, Any]) -> int:
         agent_count = max(1, int(process.get("agent_count") or 1))
         processing = int(process.get("totals", {}).get("processing") or 0)
@@ -133,6 +190,12 @@ class ProcessRuntimeService:
             return {"status": "not_in_queue"}
         if not self._process_has_capacity(process_id):
             return {"status": "process_at_capacity"}
+        if self._has_supplied_career_url(ref):
+            moved = self._move_to_processing(process_id, ref, worker_name, task_id)
+            if not moved:
+                return {"status": "not_in_queue"}
+            moved["uses_process_supplied_career_url"] = True
+            return {"status": "claimed", "domain_ref": moved}
         global_claim = self._claim_global_domain(ref, worker_name, task_id)
         if global_claim["status"] != "claimed":
             return global_claim
@@ -159,8 +222,8 @@ class ProcessRuntimeService:
     def _claim_global_domain(self, ref: dict[str, Any], worker_name: str, task_id: str) -> dict[str, Any]:
         completed = self._fresh_completed_domain(ref["registered_domain"])
         if completed:
-            return {"status": "fresh_completed", "result": completed.get("result")}
-        if self._attempts_exhausted(ref["registered_domain"]):
+            return {"status": "fresh_completed"}
+        if self._attempts_exhausted(ref["registered_domain"]) and not self._last_attempt_failed(ref["registered_domain"]):
             return {"status": "max_attempts_exceeded"}
         claimed = self._claim_runnable_domain(ref, worker_name, task_id)
         if claimed:
@@ -171,6 +234,13 @@ class ProcessRuntimeService:
         task = self._domain_tasks.find_one({"registered_domain": registered_domain}, {"attempts": 1})
         attempts = int((task or {}).get("attempts") or 0)
         return attempts >= self._settings.task_max_attempts
+
+    def _last_attempt_failed(self, registered_domain: str) -> bool:
+        task = self._domain_tasks.find_one({"registered_domain": registered_domain}, {"status": 1})
+        return (task or {}).get("status") == "failed"
+
+    def _has_supplied_career_url(self, ref: dict[str, Any]) -> bool:
+        return bool(str(ref.get("career_url") or "").strip())
 
     def _fresh_completed_domain(self, registered_domain: str) -> dict[str, Any] | None:
         threshold = _now() - timedelta(hours=24)
@@ -190,6 +260,7 @@ class ProcessRuntimeService:
                 "registered_domain": ref["registered_domain"],
                 "$or": [
                     {"status": {"$in": ["queued", "failed"]}, "attempts": {"$lt": self._settings.task_max_attempts}},
+                    {"status": "failed", "attempts": {"$gte": self._settings.task_max_attempts}},
                     {"status": "running", "last_started_at": {"$lt": stale_threshold}},
                     {"status": "completed", "last_completed_at": {"$lt": timestamp - timedelta(hours=24)}},
                 ],
@@ -253,21 +324,21 @@ class ProcessRuntimeService:
             update["$inc"] = {"attempts": -1}
         self._domain_tasks.update_one({"registered_domain": registered_domain, "status": "running"}, update)
 
-    def complete_with_reused_result(self, process_id: str, registered_domain: str, result: dict[str, Any] | None) -> None:
+    def complete_with_reused_result(self, process_id: str, registered_domain: str) -> None:
         ref = self._get_queued_ref(process_id, registered_domain)
         if not ref:
             return
-        completed_ref = self._completed_ref(ref, result or {}, reused=True)
+        completed_ref = self._completed_ref(ref, reused=True)
         self._move_queue_to_completed(process_id, ref, completed_ref)
 
     def complete_domain(self, process_id: str, domain_ref: dict[str, Any], result: dict[str, Any]) -> None:
-        completed_ref = self._completed_ref(domain_ref, result, reused=False)
+        completed_ref = self._completed_ref(domain_ref, reused=False)
         self._move_processing_to_completed(process_id, domain_ref, completed_ref)
-        self._mark_global_completed(domain_ref, result)
+        if not domain_ref.get("uses_process_supplied_career_url"):
+            self._mark_global_completed(domain_ref, result)
 
-    def _completed_ref(self, ref: dict[str, Any], result: dict[str, Any], reused: bool) -> dict[str, Any]:
+    def _completed_ref(self, ref: dict[str, Any], reused: bool) -> dict[str, Any]:
         completed = self._clean_runtime_ref(ref)
-        completed["result"] = result
         completed["reused"] = reused
         completed["completed_at"] = _now()
         return completed
@@ -276,6 +347,7 @@ class ProcessRuntimeService:
         cleaned = dict(ref)
         cleaned.pop("worker_name", None)
         cleaned.pop("celery_task_id", None)
+        cleaned.pop("uses_process_supplied_career_url", None)
         return cleaned
 
     def _move_queue_to_completed(
@@ -319,6 +391,7 @@ class ProcessRuntimeService:
                 "$set": {
                     "status": "completed",
                     "result": result,
+                    "career_url": result.get("career_url"),
                     "last_completed_at": _now(),
                     "updated_at": _now(),
                     "last_error": None,

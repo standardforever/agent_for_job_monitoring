@@ -138,13 +138,28 @@ def _build_stealth_options() -> Options:
 
 
 def patch_webdriver_flag(driver: WebDriver) -> None:
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": """
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-        """
-    })
+    source = """
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined
+        });
+    """
+    try:
+        driver.execute(
+            "executeCdpCommand",
+            {
+                "cmd": "Page.addScriptToEvaluateOnNewDocument",
+                "params": {"source": source},
+            },
+        )
+    except Exception as exc:
+        log_event(
+            logger,
+            "warning",
+            "webdriver_flag_patch_failed error=%s",
+            str(exc),
+            domain="grid",
+            error=str(exc),
+        )
 
 
 def create_session(
@@ -206,10 +221,19 @@ def create_session(
         log_event(logger, "error", "selenium_not_installed", domain=base_url)
         return None
 
+    driver = None
     try:
         driver = webdriver.Remote(
             command_executor=executor_url,
             options=_build_stealth_options(),
+        )
+        log_event(
+            logger,
+            "info",
+            "grid_session_driver_created session_id=%s",
+            driver.session_id,
+            domain=base_url,
+            session_id=driver.session_id,
         )
         patch_webdriver_flag(driver)
         _register_driver(str(driver.session_id), driver)
@@ -229,6 +253,8 @@ def create_session(
             reused_existing_session=False,
         )
     except WebDriverException as exc:
+        if driver is not None:
+            _close_failed_driver(driver)
         log_event(
             logger,
             "error",
@@ -239,6 +265,8 @@ def create_session(
         )
         return None
     except Exception as exc:
+        if driver is not None:
+            _close_failed_driver(driver)
         log_event(
             logger,
             "error",
@@ -248,6 +276,13 @@ def create_session(
             error=str(exc),
         )
         return None
+
+
+def _close_failed_driver(driver: WebDriver) -> None:
+    try:
+        driver.quit()
+    except Exception:
+        pass
 
 
 async def create_session_async(

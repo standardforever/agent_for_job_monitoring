@@ -589,6 +589,8 @@
 
     function renderProcessCard(process) {
       const stats = processLoadStats(process);
+      const action = processActionState(process);
+      const categoryAction = categoryActionState(process);
       return `
         <article class="client-card">
           <header>
@@ -602,13 +604,26 @@
               </div>
             </div>
             <div class="actions" style="margin-top: 0;">
-              <button class="primary" type="button" data-action="start-process" data-process="${escapeAttr(process.process_id)}">Start</button>
+              <button
+                class="${action.enabled ? "primary" : "secondary"}"
+                type="button"
+                data-action="start-search-node"
+                data-process="${escapeAttr(process.process_id)}"
+                ${action.enabled ? "" : "disabled"}
+              >${escapeHtml(action.label)}</button>
+              <button
+                class="${categoryAction.enabled ? "primary" : "secondary"}"
+                type="button"
+                data-action="start-career-category-node"
+                data-process="${escapeAttr(process.process_id)}"
+                ${categoryAction.enabled ? "" : "disabled"}
+              >${escapeHtml(categoryAction.label)}</button>
             </div>
           </header>
           <div class="emails">
             <span class="chip">${escapeHtml(process.source_file?.filename || "upload")}</span>
             <span class="chip">${escapeHtml(process.totals?.supplied_career_urls || 0)} career URLs supplied</span>
-            <span class="chip ok">${stats.loaded} loaded</span>
+            <span class="chip ok">${stats.loaded} career found</span>
             <span class="chip bad">${stats.failed} failed</span>
             <span class="chip">${stats.rate}% success</span>
           </div>
@@ -617,10 +632,48 @@
       `;
     }
 
+    function processActionState(process) {
+      if (isProcessActive(process)) {
+        return { enabled: false, label: "In progress" };
+      }
+      if (isProcessTerminal(process)) {
+        return { enabled: true, label: "Rerun search" };
+      }
+      return { enabled: true, label: "Start search" };
+    }
+
+    function categoryActionState(process) {
+      const totals = process.totals || {};
+      if ((totals.queued || 0) > 0 || (totals.processing || 0) > 0) {
+        return { enabled: false, label: "Category waits" };
+      }
+      if ((totals.completed || 0) <= 0) {
+        return { enabled: false, label: "No career URLs" };
+      }
+      return { enabled: true, label: "Start category" };
+    }
+
+    function isProcessActive(process) {
+      const totals = process.totals || {};
+      if ((totals.processing || 0) > 0) {
+        return true;
+      }
+      if (process.status === "running" && (totals.queued || 0) > 0) {
+        return true;
+      }
+      return (totals.queued || 0) > 0 && ((totals.completed || 0) > 0 || (totals.failed || 0) > 0);
+    }
+
+    function isProcessTerminal(process) {
+      const totals = process.totals || {};
+      const terminal = (totals.completed || 0) + (totals.failed || 0);
+      return terminal > 0 && terminal === (totals.domains || 0);
+    }
+
     function processLoadStats(process) {
-      const completed = completedDomains(process);
-      const loaded = completed.filter((item) => isLoadedResult(item.result)).length;
-      const failed = completed.filter((item) => isFailedResult(item.result)).length;
+      const totals = process.totals || {};
+      const loaded = totals.completed || 0;
+      const failed = totals.failed || 0;
       const total = loaded + failed;
       return {
         loaded,
@@ -629,48 +682,38 @@
       };
     }
 
-    function isLoadedResult(result) {
-      if (!result) {
-        return false;
-      }
-      if (typeof result.load_success === "boolean") {
-        return result.load_success;
-      }
-      return !result.load_error;
-    }
-
-    function isFailedResult(result) {
-      if (!result) {
-        return false;
-      }
-      return !isLoadedResult(result);
-    }
-
     function completedDomains(process) {
       return process.domains?.completed || [];
     }
 
+    function failedDomainsForProcess(process) {
+      return process.domains?.failed || [];
+    }
+
+    function terminalDomains(process) {
+      return [...completedDomains(process), ...failedDomainsForProcess(process)];
+    }
+
     function renderCompletedResults(process) {
-      const completed = completedDomains(process).slice(-5).reverse();
-      if (!completed.length) {
+      const domains = terminalDomains(process).slice(-5).reverse();
+      if (!domains.length) {
         return "";
       }
       return `
         <div class="result-list">
-          ${completed.map(renderCompletedResult).join("")}
+          ${domains.map(renderCompletedResult).join("")}
         </div>
       `;
     }
 
     function renderCompletedResult(item) {
-      const result = item.result || {};
-      const loaded = isLoadedResult(result);
-      const title = result.page_title || "No page title captured";
-      const url = result.final_url || result.target_url || item.domain || "";
+      const failed = Boolean(item.error);
+      const title = item.career_url || item.error || "Domain completed";
+      const url = item.career_url || item.domain || "";
       return `
         <div class="result-row">
           <div class="emails">
-            <span class="chip ${loaded ? "ok" : "bad"}">${loaded ? "loaded" : "failed"}</span>
+            <span class="chip ${failed ? "bad" : "ok"}">${failed ? "failed" : "completed"}</span>
             <span class="chip">${escapeHtml(item.registered_domain || "")}</span>
           </div>
           <div class="result-title">${escapeHtml(title)}</div>
@@ -827,10 +870,22 @@
 
     async function startProcess(processId) {
       try {
-        const data = await request(`/processes/${encodeURIComponent(processId)}/start`, {
+        const data = await request(`/nodes/search/processes/${encodeURIComponent(processId)}/start`, {
           method: "POST",
         });
-        showNotice(`Process started: ${data.enqueued} domain tasks queued.`);
+        showNotice(`${data.mode === "rerun" ? "Process rerun started" : "Search node started"}: ${data.enqueued} domain tasks queued.`);
+        await loadProcesses();
+      } catch (error) {
+        showNotice(error.message, "bad");
+      }
+    }
+
+    async function startCareerCategory(processId) {
+      try {
+        const data = await request(`/nodes/career-category/processes/${encodeURIComponent(processId)}/start`, {
+          method: "POST",
+        });
+        showNotice(`Career category node started: ${data.enqueued} domain tasks queued.`);
         await loadProcesses();
       } catch (error) {
         showNotice(error.message, "bad");
@@ -886,11 +941,16 @@
       }
     });
     elements.processList.addEventListener("click", (event) => {
-      const button = event.target.closest("button[data-action='start-process']");
+      const button = event.target.closest("button[data-action]");
       if (!button) {
         return;
       }
-      startProcess(button.dataset.process);
+      if (button.dataset.action === "start-search-node") {
+        startProcess(button.dataset.process);
+      }
+      if (button.dataset.action === "start-career-category-node") {
+        startCareerCategory(button.dataset.process);
+      }
     });
 
     elements.passwordInput.value = localStorage.getItem("admin_registration_password") || "";

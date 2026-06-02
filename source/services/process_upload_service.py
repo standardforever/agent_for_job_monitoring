@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
@@ -27,6 +26,7 @@ class ProcessUploadService:
     def __init__(self, mongodb: MongoDBService, settings: Settings) -> None:
         self._processes = mongodb.collection(settings.mongodb_process_uploads_collection)
         self._domain_tasks = mongodb.collection(settings.mongodb_process_domain_tasks_collection)
+        self._node_tasks = mongodb.collection(settings.mongodb_process_node_tasks_collection)
         self._indexes_ready = False
 
     async def _ensure_indexes(self) -> None:
@@ -186,13 +186,10 @@ class ProcessUploadService:
         }
 
     def _domain_task_updates(self, ref: dict[str, Any], timestamp: datetime) -> dict[str, Any]:
-        updates: dict[str, Any] = {
+        return {
             "domain": ref["domain"],
             "updated_at": timestamp,
         }
-        if ref.get("career_url"):
-            updates["career_url"] = ref["career_url"]
-        return updates
 
     def _serialize_process(self, process: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -225,32 +222,8 @@ class ProcessUploadService:
         await self._ensure_indexes()
         process = await self._load_process(process_id)
         domain_tasks = await self._load_related_domain_tasks(process)
-        return {"process": self._serialize_process(process), "domain_tasks": domain_tasks}
-
-    async def start_process(self, process_id: str) -> dict[str, Any]:
-        await self._ensure_indexes()
-        queued_refs = await asyncio.to_thread(self._prepare_process_start, process_id)
-        self._enqueue_domain_tasks(process_id, queued_refs)
-        return {"process_id": process_id, "enqueued": len(queued_refs)}
-
-    def _prepare_process_start(self, process_id: str) -> list[dict[str, Any]]:
-        from services.process_runtime_service import get_process_runtime_service
-
-        return get_process_runtime_service().start_process(process_id)
-
-    def _enqueue_domain_tasks(self, process_id: str, refs: list[dict[str, Any]]) -> None:
-        from infrastructure.tasks import process_domain
-
-        for ref in refs:
-            log_event(
-                logger,
-                "info",
-                "domain_task_dispatched",
-                domain="process",
-                process_id=process_id,
-                registered_domain=ref["registered_domain"],
-            )
-            process_domain.apply_async(args=[process_id, ref["registered_domain"]], queue="processes")
+        node_tasks = await self._load_related_node_tasks(process_id)
+        return {"process": self._serialize_process(process), "domain_tasks": domain_tasks, "node_tasks": node_tasks}
 
     async def _load_process(self, process_id: str) -> dict[str, Any]:
         process = await self._processes.find_one({"process_id": process_id})
@@ -282,6 +255,29 @@ class ProcessUploadService:
             "career_url": document.get("career_url"),
             "status": document.get("status"),
             "attempts": document.get("attempts", 0),
+            "last_started_at": document.get("last_started_at"),
+            "last_completed_at": document.get("last_completed_at"),
+            "last_error": document.get("last_error"),
+        }
+
+    async def _load_related_node_tasks(self, process_id: str) -> list[dict[str, Any]]:
+        cursor = self._node_tasks.find({"process_id": process_id})
+        tasks = [self._serialize_node_task(document) async for document in cursor]
+        return sorted(tasks, key=lambda item: (item["node"], item["registered_domain"]))
+
+    def _serialize_node_task(self, document: dict[str, Any]) -> dict[str, Any]:
+        result = document.get("result") or {}
+        overview = result.get("overview") if isinstance(result, dict) else {}
+        return {
+            "node": document.get("node"),
+            "domain": document.get("domain"),
+            "registered_domain": document.get("registered_domain"),
+            "status": document.get("status"),
+            "input": document.get("input"),
+            "attempts": document.get("attempts", 0),
+            "outcome": (overview or {}).get("outcome"),
+            "jobs_found": bool((overview or {}).get("jobs_found")),
+            "total_jobs_found": int((overview or {}).get("total_jobs_found") or 0),
             "last_started_at": document.get("last_started_at"),
             "last_completed_at": document.get("last_completed_at"),
             "last_error": document.get("last_error"),

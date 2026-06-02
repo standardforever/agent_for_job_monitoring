@@ -68,23 +68,6 @@ async def get_process(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/processes/{process_id}/start")
-async def start_process(
-    process_id: str,
-    _: None = Depends(validate_admin_password),
-) -> dict[str, Any]:
-    log_event(logger, "info", "process_start_requested", domain="api", process_id=process_id)
-
-    try:
-        result = await get_process_upload_service().start_process(process_id)
-    except ValueError as exc:
-        log_event(logger, "warning", "process_start_rejected", domain="api", process_id=process_id)
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    log_event(logger, "info", "process_start_completed", domain="api", process_id=process_id)
-    return {"status": "started", **result}
-
-
 def _validate_agent_count(agent_count: int) -> None:
     if agent_count < 1:
         raise HTTPException(status_code=400, detail="agent_count must be greater than zero")

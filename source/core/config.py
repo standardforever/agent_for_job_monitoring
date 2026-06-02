@@ -53,6 +53,10 @@ class Settings:
         "MONGODB_PROCESS_DOMAIN_TASKS_COLLECTION",
         "process_domain_tasks",
     )
+    mongodb_process_node_tasks_collection: str = os.getenv(
+        "MONGODB_PROCESS_NODE_TASKS_COLLECTION",
+        "process_node_tasks",
+    )
     mongodb_selenium_nodes_collection: str = os.getenv("MONGODB_SELENIUM_NODES_COLLECTION", "selenium_nodes")
     mongodb_selenium_session_slots_collection: str = os.getenv(
         "MONGODB_SELENIUM_SESSION_SLOTS_COLLECTION",

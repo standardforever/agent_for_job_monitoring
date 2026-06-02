@@ -6,9 +6,11 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, RedirectResponse
 
 from api.admin import router as admin_router
+from api.career_category_node import router as career_category_node_router
 from api.health import router as health_router
 from api.observability import router as observability_router
 from api.processes import router as process_router
+from api.search_node import router as search_node_router
 from services.mongodb_service import get_mongodb_service
 
 
@@ -19,6 +21,8 @@ app.include_router(health_router)
 app.include_router(admin_router)
 app.include_router(process_router)
 app.include_router(observability_router)
+app.include_router(search_node_router)
+app.include_router(career_category_node_router)
 
 
 @app.get("/", include_in_schema=False)

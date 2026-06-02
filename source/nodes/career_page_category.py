@@ -333,12 +333,15 @@ async def career_page_category_node(career_page_url: List[str], browser_session:
             )
 
             extracted_markdown = str(extracted_content_response["markdown"] or "")
-            navigation_result["extracted_content"] = extracted_markdown
             navigation_result["extracted_url"] = extracted_content_response.get("url")
-            navigation_result["extracted_content_fingerprint"] = _fingerprint_extracted_content(extracted_markdown)
             navigation_result["extracted_content_length"] = len(extracted_markdown)
-            navigation_result["extracted_content_preview"] = _preview_extracted_content(extracted_markdown)
             navigation_result["extracted_at"] = datetime.now(timezone.utc).isoformat()
+            
+            # NOTE: don't uncommnet it for debuging only
+            # navigation_result["extracted_content"] = extracted_markdown
+            # navigation_result["extracted_content_fingerprint"] = _fingerprint_extracted_content(extracted_markdown)
+            # navigation_result["extracted_content_preview"] = _preview_extracted_content(extracted_markdown)
+            
 
             interactive_targets = _extract_interactive_targets(extracted_content_response)
 

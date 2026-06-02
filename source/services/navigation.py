@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 from urllib.parse import urlparse, urlunparse
 from utils.logging import get_logger, log_event
-from services.content_extraction import prepare_page_for_extraction
 
 try:
     from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
@@ -11,11 +11,10 @@ except Exception:  # pragma: no cover - handled gracefully at runtime
     Page = None
     PlaywrightTimeoutError = TimeoutError
 
-from schemas.agent_state import NavigationResult
-
 
 WEB_NAVIGATION_SCHEMES = {"", "http", "https"}
 logger = get_logger("navigation")
+NavigationResult = dict[str, Any]
 SECURITY_INTERSTITIAL_MARKERS = (
     "this site doesn't support a secure connection",
     "your connection is not private",
@@ -33,6 +32,12 @@ SECURITY_INTERSTITIAL_CONTINUE_SELECTORS = (
     "button:has-text('Advanced')",
     "a:has-text('Advanced')",
 )
+
+
+async def _prepare_page_for_extraction(page: Page) -> dict[str, Any]:
+    from services.content_extraction import prepare_page_for_extraction
+
+    return await prepare_page_for_extraction(page)
 
 
 def _is_web_navigation_url(url: str | None) -> bool:
@@ -361,7 +366,7 @@ async def navigate_to_url(
         error=error,
     )
     if status == "navigated":
-        preparation = await prepare_page_for_extraction(page)
+        await _prepare_page_for_extraction(page)
         return {
             "agent_index": agent_index,
             "handle": tab_handle,
