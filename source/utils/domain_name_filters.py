@@ -91,31 +91,29 @@ class URLFilter:
             extra={"input_count": len(urls), "domain": domain},
         )
         
-        domain = domain.replace("www.", "").lower()
-        domain = domain.replace('/', '')
+        normalized_domain = URLFilter._normalized_hostname(domain)
+        if not normalized_domain:
+            return []
 
         filtered = []
-        
-        
-        
         for url in urls:
             try:
-                parsed = urlparse(url)
-                url_domain = parsed.netloc.replace("www.", "").lower()
-               
-                if url_domain == domain or url_domain.endswith(f".{domain}"):
-                    if url_domain == domain:
+                parsed = urlparse(url if "://" in url else f"https://{url}")
+                url_domain = URLFilter._normalized_hostname(url)
+
+                if url_domain == normalized_domain or url_domain.endswith(f".{normalized_domain}"):
+                    if url_domain == normalized_domain:
                         if (parsed.path and parsed.path != "/") or parsed.query or parsed.fragment:
                             filtered.append(url)
                             logger.debug(
                                 "URL matched domain",
-                                extra={"url": url, "domain": domain},
+                                extra={"url": url, "domain": normalized_domain},
                             )
                     else:
                         filtered.append(url)
                         logger.debug(
                             "URL matched subdomain",
-                            extra={"url": url, "url_domain": url_domain, "domain": domain},
+                            extra={"url": url, "url_domain": url_domain, "domain": normalized_domain},
                         )
             except Exception as e:
                 logger.debug(
@@ -129,10 +127,15 @@ class URLFilter:
             extra={
                 "input_count": len(urls),
                 "output_count": len(filtered),
-                "domain": domain,
+                "domain": normalized_domain,
             },
         )
         return filtered
+
+    @staticmethod
+    def _normalized_hostname(value: str) -> str:
+        parsed = urlparse(value if "://" in value else f"https://{value}")
+        return (parsed.hostname or "").lower().removeprefix("www.")
 
     @classmethod
     def filter_job_urls(

@@ -30,6 +30,7 @@ class UrlExtractor:
         domain: str,
         try_common_paths: bool = False,
         extract_from_homepage: bool = True,
+        filter_domain: str | None = None,
     ) -> dict:
         logger.info(
             "Starting job URL discovery from domain",
@@ -54,7 +55,7 @@ class UrlExtractor:
 
         all_urls = list(discovered_urls)
         
-        domain_filtered = URLFilter.filter_by_domain(all_urls, domain)
+        domain_filtered = URLFilter.filter_by_domain(all_urls, filter_domain or domain)
         web_filtered = URLFilter.filter_web_pages_only(domain_filtered)
         job_filtered = URLFilter.filter_job_urls(web_filtered)
 

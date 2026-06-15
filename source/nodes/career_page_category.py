@@ -14,7 +14,6 @@ import asyncio
 from services.navigation import navigate_to_url
 from utils.logging import configure_logging, get_logger, log_event
 from services.content_extraction import extract_page_content
-from services.job_pattern.job_main import main as generate_job_listing_pattern
 from services.navigation_actions import follow_navigation_target
 logger = get_logger("career_node")
 
@@ -169,6 +168,8 @@ def _normalize_career_analysis(response: dict[str, Any]) -> dict[str, Any]:
             "sort_types": [str(item) for item in (listing_ui.get("sort_types") or []) if item],
             "pagination_present": bool(listing_ui.get("pagination_present", False)),
             "pagination_type": str(listing_ui.get("pagination_type", "") or "").strip() or None,
+            "pagination_category": str(listing_ui.get("pagination_category", "") or "").strip() or None,
+            "pagination_navigation_method": str(listing_ui.get("pagination_navigation_method", "") or "").strip() or None,
             "next_page_url": str(listing_ui.get("next_page_url", "") or "").strip() or None,
         },
     }
@@ -195,46 +196,46 @@ def _preview_extracted_content(content: str, limit: int = EXTRACTED_CONTENT_PREV
     return str(content or "").strip()[:limit]
 
 
-def _job_urls_from_pattern_result(pattern_result: dict[str, Any] | None) -> list[str]:
-    if not pattern_result:
-        return []
-    return [
-        str(item.get("job_url") or "").strip()
-        for item in pattern_result.get("jobs") or []
-        if isinstance(item, dict) and str(item.get("job_url") or "").strip()
-    ]
-
-
 def _collect_job_listing_patterns(career_pages_analysis: list[dict]) -> list[dict[str, Any]]:
     patterns: list[dict[str, Any]] = []
     for result in career_pages_analysis:
-        pattern_result = result.get("job_listing_pattern")
-        if not isinstance(pattern_result, dict):
-            continue
-
         page_url = (
-            result.get("job_listing_pattern_url")
-            or result.get("classified_job_listing_url")
-            or pattern_result.get("page_url")
+            result.get("classified_job_listing_url")
             or result.get("extracted_url")
             or result.get("current_url")
             or result.get("url")
             or result.get("navigation_url")
             or ""
         )
+        if result.get("status") != "jobs_listed_on_page" or not page_url:
+            continue
         patterns.append(
             {
                 "page_url": page_url,
-                "status": pattern_result.get("status"),
-                "pattern": pattern_result.get("pattern"),
-                "generated_at": pattern_result.get("generated_at"),
-                "validation": pattern_result.get("validation"),
-                "diagnostics": pattern_result.get("diagnostics"),
-                "job_count": len(pattern_result.get("jobs") or []),
-                "example_jobs": pattern_result.get("example_jobs") or [],
+                "status": "pattern_pending",
+                "pattern": None,
+                "job_count": len(result.get("jobs_listed_on_page") or []),
+                "example_jobs": list(result.get("jobs_listed_on_page") or [])[:2],
+                "listing_ui": _clean_listing_ui(result.get("listing_ui") or {}),
+                "discovered_at": datetime.now(timezone.utc).isoformat(),
             }
         )
     return patterns
+
+
+def _clean_listing_ui(listing_ui: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ui_category": listing_ui.get("ui_category"),
+        "filter_present": bool(listing_ui.get("filter_present", False)),
+        "filter_types": [str(item) for item in (listing_ui.get("filter_types") or []) if item],
+        "sort_present": bool(listing_ui.get("sort_present", False)),
+        "sort_types": [str(item) for item in (listing_ui.get("sort_types") or []) if item],
+        "pagination_present": bool(listing_ui.get("pagination_present", False)),
+        "pagination_type": listing_ui.get("pagination_type"),
+        "pagination_category": listing_ui.get("pagination_category"),
+        "pagination_navigation_method": listing_ui.get("pagination_navigation_method"),
+        "next_page_url": listing_ui.get("next_page_url"),
+    }
 
 
 def _next_candidate(candidates: list[str], checked: set[str]) -> str | None:
@@ -408,36 +409,6 @@ async def career_page_category_node(career_page_url: List[str], browser_session:
                     or career_url
                 )
                 navigation_result["classified_job_listing_url"] = listing_page_url
-                try:
-                    job_pattern_result = await generate_job_listing_pattern(
-                        browser_session.page if browser_session is not None else None,
-                        url=listing_page_url,
-                        example_jobs=normalized["jobs_listed_on_page"],
-                    )
-                    navigation_result["job_listing_pattern"] = job_pattern_result
-                    navigation_result["job_listing_pattern_url"] = listing_page_url
-
-                    pattern_job_urls = _job_urls_from_pattern_result(job_pattern_result)
-                    # pattern_job_urls = None
-                    if pattern_job_urls:
-                        job_urls_on_page = _dedupe_urls(job_urls_on_page + pattern_job_urls)
-                        existing_job_urls = _dedupe_urls(existing_job_urls + pattern_job_urls)
-                        navigation_result["jobs_listed_on_page"] = existing_job_urls
-                except Exception as exc:
-                    navigation_result["job_listing_pattern"] = {
-                        "status": "pattern_generation_failed",
-                        "page_url": listing_page_url,
-                        "error": str(exc),
-                    }
-                    log_event(
-                        logger,
-                        "warning",
-                        "job_listing_pattern_generation_failed url=%s error=%s",
-                        listing_page_url,
-                        exc,
-                        domain=career_url,
-                        page_url=listing_page_url,
-                    )
 
             if category == "not_job_related":
                 navigation_result["status"] = "access_issue" if page_inaccessible else "not_job_related"

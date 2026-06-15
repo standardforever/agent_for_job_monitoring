@@ -11,6 +11,7 @@ from core.config import Settings, get_settings
 from services.admin_client_service import get_admin_client_service
 from services.file_input_service import UploadDomainInput
 from services.mongodb_service import MongoDBService, get_mongodb_service
+from services.node_lifecycle import NOT_STARTED
 from utils.tld import registered_domain
 from utils.logging import get_logger, log_event
 
@@ -26,7 +27,6 @@ class ProcessUploadService:
     def __init__(self, mongodb: MongoDBService, settings: Settings) -> None:
         self._processes = mongodb.collection(settings.mongodb_process_uploads_collection)
         self._domain_tasks = mongodb.collection(settings.mongodb_process_domain_tasks_collection)
-        self._node_tasks = mongodb.collection(settings.mongodb_process_node_tasks_collection)
         self._indexes_ready = False
 
     async def _ensure_indexes(self) -> None:
@@ -122,6 +122,9 @@ class ProcessUploadService:
             "client": client,
             "agent_count": agent_count,
             "status": "queued",
+            "career_status": NOT_STARTED,
+            "job_pattern_status": NOT_STARTED,
+            "job_extraction_status": NOT_STARTED,
             "source_file": self._source_file(filename, domain_refs),
             "totals": self._totals(domain_refs),
             "domains": self._initial_domain_state(domain_refs),
@@ -197,6 +200,21 @@ class ProcessUploadService:
             "client": process["client"],
             "agent_count": process["agent_count"],
             "status": process["status"],
+            "career_status": process.get("career_status"),
+            "career_totals": process.get("career_totals"),
+            "career_started_at": process.get("career_started_at"),
+            "career_completed_at": process.get("career_completed_at"),
+            "career_last_error": process.get("career_last_error"),
+            "job_pattern_status": process.get("job_pattern_status"),
+            "job_pattern_totals": process.get("job_pattern_totals"),
+            "job_pattern_started_at": process.get("job_pattern_started_at"),
+            "job_pattern_completed_at": process.get("job_pattern_completed_at"),
+            "job_pattern_last_error": process.get("job_pattern_last_error"),
+            "job_extraction_status": process.get("job_extraction_status"),
+            "job_extraction_totals": process.get("job_extraction_totals"),
+            "job_extraction_started_at": process.get("job_extraction_started_at"),
+            "job_extraction_completed_at": process.get("job_extraction_completed_at"),
+            "job_extraction_last_error": process.get("job_extraction_last_error"),
             "source_file": process["source_file"],
             "totals": process["totals"],
             "domains": process.get("domains", self._empty_domain_state()),
@@ -222,8 +240,7 @@ class ProcessUploadService:
         await self._ensure_indexes()
         process = await self._load_process(process_id)
         domain_tasks = await self._load_related_domain_tasks(process)
-        node_tasks = await self._load_related_node_tasks(process_id)
-        return {"process": self._serialize_process(process), "domain_tasks": domain_tasks, "node_tasks": node_tasks}
+        return {"process": self._serialize_process(process), "domain_tasks": domain_tasks}
 
     async def _load_process(self, process_id: str) -> dict[str, Any]:
         process = await self._processes.find_one({"process_id": process_id})
@@ -258,30 +275,12 @@ class ProcessUploadService:
             "last_started_at": document.get("last_started_at"),
             "last_completed_at": document.get("last_completed_at"),
             "last_error": document.get("last_error"),
+            "career_process_status": document.get("career_process_status"),
+            "career_process": document.get("career_process"),
+            "career_process_last_completed_at": document.get("career_process_last_completed_at"),
+            "career_process_last_error": document.get("career_process_last_error"),
         }
 
-    async def _load_related_node_tasks(self, process_id: str) -> list[dict[str, Any]]:
-        cursor = self._node_tasks.find({"process_id": process_id})
-        tasks = [self._serialize_node_task(document) async for document in cursor]
-        return sorted(tasks, key=lambda item: (item["node"], item["registered_domain"]))
-
-    def _serialize_node_task(self, document: dict[str, Any]) -> dict[str, Any]:
-        result = document.get("result") or {}
-        overview = result.get("overview") if isinstance(result, dict) else {}
-        return {
-            "node": document.get("node"),
-            "domain": document.get("domain"),
-            "registered_domain": document.get("registered_domain"),
-            "status": document.get("status"),
-            "input": document.get("input"),
-            "attempts": document.get("attempts", 0),
-            "outcome": (overview or {}).get("outcome"),
-            "jobs_found": bool((overview or {}).get("jobs_found")),
-            "total_jobs_found": int((overview or {}).get("total_jobs_found") or 0),
-            "last_started_at": document.get("last_started_at"),
-            "last_completed_at": document.get("last_completed_at"),
-            "last_error": document.get("last_error"),
-        }
 
 
 @lru_cache(maxsize=1)

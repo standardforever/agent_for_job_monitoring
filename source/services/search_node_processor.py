@@ -73,9 +73,12 @@ class SearchNodeProcessor:
                 self._log_session_create_started(domain_ref, slot)
                 session = await self._create_selenium_session(slot)
                 self._log_session_created(domain_ref, slot, session.session_id)
+                self._heartbeat(slot)
                 browser_session = await self._attach_browser(session.cdp_url)
                 self._log_browser_attached(domain_ref, session.session_id)
+                self._heartbeat(slot)
                 node_result = await self._run_search_node(domain_ref, browser_session)
+                self._heartbeat(slot)
                 return self._result(domain_ref, slot, node_result, time.monotonic() - started)
             finally:
                 await close_browser_attachment(browser_session)
@@ -88,7 +91,7 @@ class SearchNodeProcessor:
         return session
 
     async def _attach_browser(self, cdp_url: str):
-        browser_session = await attach_playwright_to_cdp(cdp_url)
+        browser_session = await attach_playwright_to_cdp(cdp_url, raise_on_failure=True)
         if browser_session is None:
             raise RuntimeError("Could not attach Playwright to Selenium session")
         return browser_session
@@ -96,7 +99,11 @@ class SearchNodeProcessor:
     async def _run_search_node(self, domain_ref: dict[str, Any], browser_session: Any) -> dict[str, Any]:
         target = str(domain_ref.get("domain") or domain_ref["registered_domain"])
         self._log_started(domain_ref, target)
-        return await career_url_extraction_node(target, browser_session)
+        return await career_url_extraction_node(
+            target,
+            browser_session,
+            registered_domain=domain_ref["registered_domain"],
+        )
 
     async def _close_selenium_session(self, slot: dict[str, Any], session: Any) -> None:
         if session is None:
@@ -121,6 +128,7 @@ class SearchNodeProcessor:
             "career_urls": career_urls,
             "non_domain_career_urls": node_result.get("non_domain_career_urls", []),
             "all_urls": node_result.get("all_urls", []),
+            "diagnostics": node_result.get("diagnostics", {}),
             "status": node_result.get("status"),
             "success": success,
             "error": node_result.get("error_message"),
@@ -180,6 +188,9 @@ class SearchNodeProcessor:
 
     def _release_slot(self, slot: dict[str, Any]) -> None:
         get_selenium_session_slot_service().release_slot(slot["slot_id"])
+
+    def _heartbeat(self, slot: dict[str, Any]) -> None:
+        get_selenium_session_slot_service().heartbeat_slot(slot["slot_id"])
 
     def _has_supplied_career_url(self, domain_ref: dict[str, Any]) -> bool:
         return bool(str(domain_ref.get("career_url") or "").strip())

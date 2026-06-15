@@ -591,6 +591,8 @@
       const stats = processLoadStats(process);
       const action = processActionState(process);
       const categoryAction = categoryActionState(process);
+      const jobPatternAction = jobPatternActionState(process);
+      const jobExtractionAction = jobExtractionActionState(process);
       return `
         <article class="client-card">
           <header>
@@ -599,6 +601,9 @@
               <div class="meta">
                 <span>Client: ${escapeHtml(process.client?.client_name || "")}</span>
                 <span>Status: ${escapeHtml(process.status || "")}</span>
+                <span>Career: ${escapeHtml(process.career_status || "not started")}</span>
+                <span>Pattern: ${escapeHtml(process.job_pattern_status || "not started")}</span>
+                <span>Jobs: ${escapeHtml(process.job_extraction_status || "not started")}</span>
                 <span>Agents: ${escapeHtml(process.agent_count || "")}</span>
                 <span>Domains: ${escapeHtml(process.totals?.domains || 0)}</span>
               </div>
@@ -618,6 +623,20 @@
                 data-process="${escapeAttr(process.process_id)}"
                 ${categoryAction.enabled ? "" : "disabled"}
               >${escapeHtml(categoryAction.label)}</button>
+              <button
+                class="${jobPatternAction.enabled ? "primary" : "secondary"}"
+                type="button"
+                data-action="start-job-pattern-node"
+                data-process="${escapeAttr(process.process_id)}"
+                ${jobPatternAction.enabled ? "" : "disabled"}
+              >${escapeHtml(jobPatternAction.label)}</button>
+              <button
+                class="${jobExtractionAction.enabled ? "primary" : "secondary"}"
+                type="button"
+                data-action="start-job-extraction-node"
+                data-process="${escapeAttr(process.process_id)}"
+                ${jobExtractionAction.enabled ? "" : "disabled"}
+              >${escapeHtml(jobExtractionAction.label)}</button>
             </div>
           </header>
           <div class="emails">
@@ -626,6 +645,9 @@
             <span class="chip ok">${stats.loaded} career found</span>
             <span class="chip bad">${stats.failed} failed</span>
             <span class="chip">${stats.rate}% success</span>
+            ${renderCareerTotals(process)}
+            ${renderJobPatternTotals(process)}
+            ${renderJobExtractionTotals(process)}
           </div>
           ${renderCompletedResults(process)}
         </article>
@@ -644,6 +666,9 @@
 
     function categoryActionState(process) {
       const totals = process.totals || {};
+      if (isCareerActive(process)) {
+        return { enabled: false, label: "Career running" };
+      }
       if ((totals.queued || 0) > 0 || (totals.processing || 0) > 0) {
         return { enabled: false, label: "Category waits" };
       }
@@ -651,6 +676,76 @@
         return { enabled: false, label: "No career URLs" };
       }
       return { enabled: true, label: "Start category" };
+    }
+
+    function isCareerActive(process) {
+      return ["queued", "running"].includes(process.career_status || "");
+    }
+
+    function jobPatternActionState(process) {
+      if (isJobPatternActive(process)) {
+        return { enabled: false, label: "Pattern running" };
+      }
+      if (!["completed", "partial_completed"].includes(process.career_status || "")) {
+        return { enabled: false, label: "Pattern waits" };
+      }
+      return { enabled: true, label: isNodeStarted(process.job_pattern_status) ? "Rerun patterns" : "Create patterns" };
+    }
+
+    function isJobPatternActive(process) {
+      return ["queued", "running"].includes(process.job_pattern_status || "");
+    }
+
+    function jobExtractionActionState(process) {
+      if (isJobExtractionActive(process)) {
+        return { enabled: false, label: "Jobs running" };
+      }
+      if (!["completed", "partial_completed"].includes(process.job_pattern_status || "")) {
+        return { enabled: false, label: "Jobs wait" };
+      }
+      return { enabled: true, label: isNodeStarted(process.job_extraction_status) ? "Rerun jobs" : "Extract jobs" };
+    }
+
+    function isJobExtractionActive(process) {
+      return ["queued", "running"].includes(process.job_extraction_status || "");
+    }
+
+    function isNodeStarted(status) {
+      return Boolean(status && status !== "not_started");
+    }
+
+    function renderCareerTotals(process) {
+      const totals = process.career_totals || null;
+      if (!totals) {
+        return "";
+      }
+      return renderNodeTotalsChip("Category", process.career_status, totals);
+    }
+
+    function renderJobPatternTotals(process) {
+      const totals = process.job_pattern_totals || null;
+      if (!totals) {
+        return "";
+      }
+      return renderNodeTotalsChip("Patterns", process.job_pattern_status, totals, "no listing");
+    }
+
+    function renderJobExtractionTotals(process) {
+      const totals = process.job_extraction_totals || null;
+      if (!totals) {
+        return "";
+      }
+      return renderNodeTotalsChip("Jobs", process.job_extraction_status, totals);
+    }
+
+    function renderNodeTotalsChip(label, status, totals, blockedLabel = "blocked") {
+      const completed = totals.completed || 0;
+      const failed = totals.failed || 0;
+      const running = totals.running || 0;
+      const queued = totals.queued || 0;
+      const blocked = totals.blocked || 0;
+      const total = totals.domains || 0;
+      return `<span class="chip">${escapeHtml(label)} ${escapeHtml(status || "not started")}: ${escapeHtml(completed)}/${escapeHtml(total)} ok, ${escapeHtml(failed)} fail, ${escapeHtml(running)} run, ${escapeHtml(queued)} queue, ${escapeHtml(blocked)} ${escapeHtml(blockedLabel)}</span>`;
     }
 
     function isProcessActive(process) {
@@ -868,27 +963,67 @@
       }
     }
 
-    async function startProcess(processId) {
+    async function startProcess(processId, button = null) {
+      if (button) {
+        button.disabled = true;
+      }
       try {
         const data = await request(`/nodes/search/processes/${encodeURIComponent(processId)}/start`, {
           method: "POST",
         });
         showNotice(`${data.mode === "rerun" ? "Process rerun started" : "Search node started"}: ${data.enqueued} domain tasks queued.`);
-        await loadProcesses();
       } catch (error) {
         showNotice(error.message, "bad");
+      } finally {
+        await loadProcesses();
       }
     }
 
-    async function startCareerCategory(processId) {
+    async function startCareerCategory(processId, button = null) {
+      if (button) {
+        button.disabled = true;
+      }
       try {
         const data = await request(`/nodes/career-category/processes/${encodeURIComponent(processId)}/start`, {
           method: "POST",
         });
         showNotice(`Career category node started: ${data.enqueued} domain tasks queued.`);
-        await loadProcesses();
       } catch (error) {
         showNotice(error.message, "bad");
+      } finally {
+        await loadProcesses();
+      }
+    }
+
+    async function startJobPattern(processId, button = null) {
+      if (button) {
+        button.disabled = true;
+      }
+      try {
+        const data = await request(`/nodes/job-pattern/processes/${encodeURIComponent(processId)}/start`, {
+          method: "POST",
+        });
+        showNotice(`Job pattern node started: ${data.enqueued} domain tasks queued.`);
+      } catch (error) {
+        showNotice(error.message, "bad");
+      } finally {
+        await loadProcesses();
+      }
+    }
+
+    async function startJobExtraction(processId, button = null) {
+      if (button) {
+        button.disabled = true;
+      }
+      try {
+        const data = await request(`/nodes/job-extraction/processes/${encodeURIComponent(processId)}/start`, {
+          method: "POST",
+        });
+        showNotice(`Job extraction node started: ${data.enqueued} domain tasks queued.`);
+      } catch (error) {
+        showNotice(error.message, "bad");
+      } finally {
+        await loadProcesses();
       }
     }
 
@@ -946,10 +1081,16 @@
         return;
       }
       if (button.dataset.action === "start-search-node") {
-        startProcess(button.dataset.process);
+        startProcess(button.dataset.process, button);
       }
       if (button.dataset.action === "start-career-category-node") {
-        startCareerCategory(button.dataset.process);
+        startCareerCategory(button.dataset.process, button);
+      }
+      if (button.dataset.action === "start-job-pattern-node") {
+        startJobPattern(button.dataset.process, button);
+      }
+      if (button.dataset.action === "start-job-extraction-node") {
+        startJobExtraction(button.dataset.process, button);
       }
     });
 

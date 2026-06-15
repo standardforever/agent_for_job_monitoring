@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
@@ -284,6 +285,7 @@ async def main(
             "attempts": attempts,
             "html_length": len(html),
             "prepared_html_length": len(llm_html),
+            "page_fingerprint": hashlib.sha256(llm_html.encode("utf-8")).hexdigest(),
             "example_jobs": normalized_example_jobs,
         }
     except Exception as exc:

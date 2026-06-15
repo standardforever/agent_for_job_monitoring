@@ -7,6 +7,7 @@ import redis
 
 from core.config import Settings, get_settings
 from infrastructure.celery_app import celery_app
+from services.node_run_history_service import get_node_run_history_service
 from services.sync_mongodb_service import SyncMongoDBService, get_sync_mongodb_service
 from utils.logging import get_logger, log_event
 
@@ -26,6 +27,10 @@ class PipelineObservabilityService:
             "processes": self._process_counts(),
             "domains": self._domain_counts(),
             "selenium_slots": self._slot_counts(),
+            "selenium_capacity": self._selenium_capacity(),
+            "nodes": self._node_process_counts(),
+            "node_runs": get_node_run_history_service().counts_by_node_status(),
+            "recent_node_runs": get_node_run_history_service().recent_runs(limit=20),
             "queue": self._queue_stats(),
             "workers": self._worker_stats(),
         }
@@ -38,6 +43,22 @@ class PipelineObservabilityService:
 
     def _slot_counts(self) -> dict[str, int]:
         return self._count_by_field(self._slots, "status")
+
+    def _selenium_capacity(self) -> dict[str, int]:
+        counts = self._slot_counts()
+        total = sum(counts.values())
+        busy = int(counts.get("busy") or 0)
+        available = int(counts.get("available") or 0)
+        stale = int(counts.get("stale") or 0)
+        return {"total": total, "busy": busy, "available": available, "stale": stale}
+
+    def _node_process_counts(self) -> dict[str, dict[str, int]]:
+        return {
+            "search": self._count_by_field(self._processes, "status"),
+            "career_category": self._count_by_field(self._processes, "career_status"),
+            "job_pattern": self._count_by_field(self._processes, "job_pattern_status"),
+            "job_extraction": self._count_by_field(self._processes, "job_extraction_status"),
+        }
 
     def _count_by_field(self, collection: Any, field: str) -> dict[str, int]:
         rows = collection.aggregate([{"$group": {"_id": f"${field}", "count": {"$sum": 1}}}])

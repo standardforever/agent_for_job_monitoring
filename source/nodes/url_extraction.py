@@ -56,13 +56,26 @@ def _normalize_input_target(raw_value: str) -> tuple[str, str]:
     return without_www, with_www
 
 
+def _search_domain_text(raw_value: str) -> str:
+    cleaned = str(raw_value or "").strip()
+    with_scheme = cleaned if "://" in cleaned else f"https://{cleaned}"
+    parsed = urlparse(with_scheme)
+    domain = (parsed.netloc or parsed.path).strip().removeprefix("www.")
+    return domain.rstrip("/")
+
+
 def _is_cross_domain_redirect(original_url: str | None, final_url: str | None) -> bool:
     original_domain = extract_base_domain(original_url)
     final_domain = extract_base_domain(final_url)
     return bool(original_domain and final_domain and original_domain != final_domain)
 
 
-async def career_url_extraction_node(navigate_to: str, browser_session: Any) -> dict:
+async def career_url_extraction_node(
+    navigate_to: str,
+    browser_session: Any,
+    *,
+    registered_domain: str | None = None,
+) -> dict:
     log_event(
         logger,
         "info",
@@ -75,7 +88,8 @@ async def career_url_extraction_node(navigate_to: str, browser_session: Any) -> 
         "status": None,
         "error_message": None,
         "career_urls": [],
-        "non_domain_career_urls": []
+        "non_domain_career_urls": [],
+        "diagnostics": {},
     }
 
     url_no_www, url_with_www = _normalize_input_target(navigate_to)
@@ -86,6 +100,7 @@ async def career_url_extraction_node(navigate_to: str, browser_session: Any) -> 
         domain=url_no_www,
         try_common_paths=False,
         extract_from_homepage=True,
+        filter_domain=registered_domain,
     )
 
     active_url = url_no_www
@@ -102,6 +117,7 @@ async def career_url_extraction_node(navigate_to: str, browser_session: Any) -> 
             domain=url_with_www,
             try_common_paths=False,
             extract_from_homepage=True,
+            filter_domain=registered_domain,
         )
         active_url = url_with_www
     
@@ -151,14 +167,28 @@ async def career_url_extraction_node(navigate_to: str, browser_session: Any) -> 
 
     
     non_domain_careers_result = await extractor._extract_career_urls_from_page(active_url)
-    search_query = f"{navigate_to} jobs careers vacancies openings"
-    search_result = await extractor.search_duckduckgo(search_query, navigate_to)
+    search_domain = _search_domain_text(registered_domain or navigate_to)
+    search_query = f"{search_domain} jobs careers vacancies openings"
+    search_result = await extractor.search_duckduckgo(search_query, registered_domain or navigate_to)
+    return_dict["diagnostics"]["search_query"] = search_query
+    return_dict["diagnostics"]["homepage_status"] = fallback_urls.get("status")
+    return_dict["diagnostics"]["search_status"] = search_result.get("status")
+    return_dict["diagnostics"]["search_error"] = search_result.get("error")
+    return_dict["diagnostics"]["active_url"] = active_url
     
     all_urls = _dedupe_urls(list(fallback_urls.get("meta_data", {}).get('all_urls', [])) +   list(search_result.get("meta_data", {}).get('all_urls', [])))
-    combined_job_urls = _dedupe_urls(
-        list(fallback_urls.get("result", []) or []) + list(search_result.get("result", []) or [])
-    )
     non_domain_career_urls = _dedupe_career_items(list(non_domain_careers_result.get("result", []) or []))
+    external_career_urls = [item["url"] for item in non_domain_career_urls]
+    combined_job_urls = _dedupe_urls(
+        list(fallback_urls.get("result", []) or [])
+        + list(search_result.get("result", []) or [])
+        + external_career_urls
+    )
+    return_dict["all_urls"] = all_urls
+    return_dict["non_domain_career_urls"] = non_domain_career_urls
+    return_dict["diagnostics"]["homepage_discovered_count"] = len(fallback_urls.get("meta_data", {}).get("all_urls", []) or [])
+    return_dict["diagnostics"]["search_raw_count"] = len(search_result.get("meta_data", {}).get("all_urls", []) or [])
+    return_dict["diagnostics"]["external_career_count"] = len(non_domain_career_urls)
 
     if not combined_job_urls:
         downstream_failures: list[str] = []
@@ -174,6 +204,7 @@ async def career_url_extraction_node(navigate_to: str, browser_session: Any) -> 
         if downstream_failures:
             return_dict["status"] = "career_page_discovery_failed"
             return_dict["error_message"] = " | ".join(downstream_failures)
+            return_dict["diagnostics"]["downstream_failures"] = downstream_failures
             log_event(
                 logger,
                 "warning",
@@ -189,6 +220,9 @@ async def career_url_extraction_node(navigate_to: str, browser_session: Any) -> 
 
         return_dict["status"] = "no_career_page_found"
         return_dict["error_message"] = "no_job_or_career_candidates_found"
+        return_dict["diagnostics"]["homepage_candidate_count"] = len(fallback_urls.get("result", []) or [])
+        return_dict["diagnostics"]["search_candidate_count"] = len(search_result.get("result", []) or [])
+        return_dict["diagnostics"]["non_domain_career_count"] = len(non_domain_career_urls)
         log_event(
             logger,
             "info",
@@ -201,9 +235,7 @@ async def career_url_extraction_node(navigate_to: str, browser_session: Any) -> 
         return return_dict
 
     return_dict["status"] = "career_urls_found"
-    return_dict["non_domain_career_urls"] = non_domain_career_urls
     return_dict["career_urls"] = combined_job_urls
-    return_dict['all_urls'] = all_urls
 
     log_event(
         logger,

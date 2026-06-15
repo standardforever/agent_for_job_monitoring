@@ -7,6 +7,8 @@ from typing import Any
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
 
 from core.config import Settings, get_settings
+from services.failure_classifier import classify_failure
+from services.node_lifecycle import retry_policy, terminal_status
 from services.sync_mongodb_service import SyncMongoDBService, get_sync_mongodb_service
 from utils.logging import get_logger, log_event
 
@@ -233,7 +235,7 @@ class ProcessRuntimeService:
     def _attempts_exhausted(self, registered_domain: str) -> bool:
         task = self._domain_tasks.find_one({"registered_domain": registered_domain}, {"attempts": 1})
         attempts = int((task or {}).get("attempts") or 0)
-        return attempts >= self._settings.task_max_attempts
+        return attempts >= retry_policy("search", self._settings.task_max_attempts).max_attempts
 
     def _last_attempt_failed(self, registered_domain: str) -> bool:
         task = self._domain_tasks.find_one({"registered_domain": registered_domain}, {"status": 1})
@@ -255,12 +257,13 @@ class ProcessRuntimeService:
     def _claim_runnable_domain(self, ref: dict[str, Any], worker_name: str, task_id: str) -> dict[str, Any] | None:
         timestamp = _now()
         stale_threshold = timestamp - timedelta(seconds=self._settings.stale_task_seconds)
+        max_attempts = retry_policy("search", self._settings.task_max_attempts).max_attempts
         return self._domain_tasks.find_one_and_update(
             {
                 "registered_domain": ref["registered_domain"],
                 "$or": [
-                    {"status": {"$in": ["queued", "failed"]}, "attempts": {"$lt": self._settings.task_max_attempts}},
-                    {"status": "failed", "attempts": {"$gte": self._settings.task_max_attempts}},
+                    {"status": {"$in": ["queued", "failed"]}, "attempts": {"$lt": max_attempts}},
+                    {"status": "failed", "attempts": {"$gte": max_attempts}},
                     {"status": "running", "last_started_at": {"$lt": stale_threshold}},
                     {"status": "completed", "last_completed_at": {"$lt": timestamp - timedelta(hours=24)}},
                 ],
@@ -315,8 +318,13 @@ class ProcessRuntimeService:
         updated = dict(ref)
         updated["worker_name"] = worker_name
         updated["celery_task_id"] = task_id
+        updated["attempts"] = self._domain_attempts(ref["registered_domain"])
         updated["started_at"] = _now()
         return updated
+
+    def _domain_attempts(self, registered_domain: str) -> int:
+        task = self._domain_tasks.find_one({"registered_domain": registered_domain}, {"attempts": 1})
+        return int((task or {}).get("attempts") or 0)
 
     def _release_global_domain(self, registered_domain: str, *, decrement_attempt: bool = False) -> None:
         update: dict[str, Any] = {"$set": {"status": "queued", "updated_at": _now()}}
@@ -400,18 +408,30 @@ class ProcessRuntimeService:
             },
         )
 
-    def fail_domain(self, process_id: str, domain_ref: dict[str, Any], error: str) -> None:
+    def fail_domain(
+        self,
+        process_id: str,
+        domain_ref: dict[str, Any],
+        error: str,
+        result: dict[str, Any] | None = None,
+    ) -> None:
         failed_ref = self._failed_ref(domain_ref, error)
         self._move_processing_to_failed(process_id, domain_ref, failed_ref)
-        self._mark_global_failed(domain_ref, error)
+        self._mark_global_failed(domain_ref, error, result)
 
-    def fail_queued_domain(self, process_id: str, registered_domain: str, error: str) -> None:
+    def fail_queued_domain(
+        self,
+        process_id: str,
+        registered_domain: str,
+        error: str,
+        result: dict[str, Any] | None = None,
+    ) -> None:
         ref = self._get_queued_ref(process_id, registered_domain)
         if not ref:
             return
         failed_ref = self._failed_ref(ref, error)
         self._move_queue_to_failed(process_id, ref, failed_ref)
-        self._mark_global_failed(ref, error)
+        self._mark_global_failed(ref, error, result)
 
     def requeue_domain(
         self,
@@ -473,14 +493,40 @@ class ProcessRuntimeService:
         )
         self._refresh_process_status(process_id)
 
-    def _mark_global_failed(self, ref: dict[str, Any], error: str) -> None:
+    def _mark_global_failed(self, ref: dict[str, Any], error: str, result: dict[str, Any] | None = None) -> None:
+        fields: dict[str, Any] = {
+            "status": "failed",
+            "last_error": error,
+            "last_failure_type": classify_failure(error),
+            "updated_at": _now(),
+        }
+        if result:
+            fields["last_result"] = result
+            fields["last_error_details"] = self._error_details_from_result(result)
         self._domain_tasks.update_one(
             {"registered_domain": ref["registered_domain"]},
             {
-                "$set": {"status": "failed", "last_error": error, "updated_at": _now()},
+                "$set": fields,
                 "$unset": {"worker_name": "", "celery_task_id": ""},
             },
         )
+
+    def _error_details_from_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in {
+                "status": result.get("status"),
+                "error": result.get("error"),
+                "diagnostics": result.get("diagnostics"),
+                "career_urls": result.get("career_urls"),
+                "non_domain_career_urls": result.get("non_domain_career_urls"),
+                "all_urls_count": len(result.get("all_urls", []) or []),
+                "duration_seconds": result.get("duration_seconds"),
+                "selenium_node_id": result.get("selenium_node_id"),
+                "selenium_session_slot_id": result.get("selenium_session_slot_id"),
+            }.items()
+            if value not in (None, "", [])
+        }
 
     def requeue_stale_processing(self, process_id: str) -> int:
         process = self._load_process(process_id)
@@ -535,9 +581,10 @@ class ProcessRuntimeService:
             if process.get("status") == "running":
                 return "running"
             return "queued"
-        if totals.get("failed", 0) > 0:
-            return "partial_completed"
-        return "completed"
+        return terminal_status(
+            completed=int(totals.get("completed") or 0),
+            failed=int(totals.get("failed") or 0),
+        )
 
 
 @lru_cache(maxsize=1)

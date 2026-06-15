@@ -11,7 +11,7 @@ services:
       MONGODB_CLIENTS_COLLECTION: clients
       MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
       MONGODB_PROCESS_DOMAIN_TASKS_COLLECTION: process_domain_tasks
-      MONGODB_PROCESS_NODE_TASKS_COLLECTION: process_node_tasks
+      MONGODB_DOMAIN_JOBS_COLLECTION: domain_jobs
       MONGODB_SELENIUM_NODES_COLLECTION: selenium_nodes
       MONGODB_SELENIUM_SESSION_SLOTS_COLLECTION: selenium_session_slots
       SELENIUM_GRID_URLS: http://selenium_1:4444/wd/hub,http://selenium_2:4444/wd/hub
@@ -51,7 +51,7 @@ services:
       MONGODB_CLIENTS_COLLECTION: clients
       MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
       MONGODB_PROCESS_DOMAIN_TASKS_COLLECTION: process_domain_tasks
-      MONGODB_PROCESS_NODE_TASKS_COLLECTION: process_node_tasks
+      MONGODB_DOMAIN_JOBS_COLLECTION: domain_jobs
       MONGODB_SELENIUM_NODES_COLLECTION: selenium_nodes
       MONGODB_SELENIUM_SESSION_SLOTS_COLLECTION: selenium_session_slots
       SELENIUM_GRID_URLS: http://selenium_1:4444/wd/hub,http://selenium_2:4444/wd/hub
@@ -84,7 +84,7 @@ services:
       MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
       MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
       MONGODB_PROCESS_DOMAIN_TASKS_COLLECTION: process_domain_tasks
-      MONGODB_PROCESS_NODE_TASKS_COLLECTION: process_node_tasks
+      MONGODB_DOMAIN_JOBS_COLLECTION: domain_jobs
       MONGODB_SELENIUM_NODES_COLLECTION: selenium_nodes
       MONGODB_SELENIUM_SESSION_SLOTS_COLLECTION: selenium_session_slots
       SELENIUM_GRID_URLS: http://selenium_1:4444/wd/hub,http://selenium_2:4444/wd/hub

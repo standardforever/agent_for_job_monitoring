@@ -4,7 +4,8 @@ from functools import lru_cache
 from typing import Any
 
 from core.config import Settings, get_settings
-from services.process_node_task_service import get_process_node_task_service
+from services.career_process_service import get_career_process_service
+from services.node_preflight_service import get_node_preflight_service
 from services.sync_mongodb_service import SyncMongoDBService, get_sync_mongodb_service
 from utils.logging import get_logger, log_event
 
@@ -17,19 +18,21 @@ class CareerCategoryNodeService:
         self._settings = settings
         self._processes = mongodb.collection(settings.mongodb_process_uploads_collection)
         self._domain_tasks = mongodb.collection(settings.mongodb_process_domain_tasks_collection)
-        self._node_tasks = get_process_node_task_service()
+        self._career_process = get_career_process_service()
 
     def start_process(self, process_id: str) -> dict[str, Any]:
+        get_node_preflight_service().require_client_openai_config(process_id)
         process = self._load_ready_process(process_id)
         tasks = self._build_tasks(process)
-        summary = self._node_tasks.upsert_category_tasks(tasks)
-        queued = self._node_tasks.queued_category_tasks(process_id)
-        self._dispatch_tasks(queued)
+        summary = self._career_process.create_category_tasks(tasks)
+        self._career_process.start_process_run(process_id, summary)
+        self._dispatch_tasks(process_id, summary["created_tasks"])
         return {
             "process_id": process_id,
             "created": summary["created"],
             "failed_without_candidates": summary["failed"],
-            "enqueued": len(queued),
+            "blocked": summary["blocked"],
+            "enqueued": len(summary["created_tasks"]),
         }
 
     def _load_ready_process(self, process_id: str) -> dict[str, Any]:
@@ -39,6 +42,8 @@ class CareerCategoryNodeService:
         totals = process.get("totals", {})
         if int(totals.get("queued") or 0) > 0 or int(totals.get("processing") or 0) > 0:
             raise RuntimeError("Search node must finish before career category node starts")
+        if self._career_process.active_process_run(process):
+            raise RuntimeError("Career category node is already running for this process")
         return process
 
     def _build_tasks(self, process: dict[str, Any]) -> list[dict[str, Any]]:
@@ -51,11 +56,9 @@ class CareerCategoryNodeService:
         career_urls = self._career_url_candidates(ref)
         status = "queued" if career_urls else "failed"
         task = {
-            "process_id": process["process_id"],
             "node": "career_page_category",
             "registered_domain": ref["registered_domain"],
             "domain": ref.get("domain"),
-            "client_name": process.get("client", {}).get("client_name"),
             "input": {"career_urls": career_urls},
             "status": status,
             "last_error": None if career_urls else "No career URL candidates available",
@@ -70,7 +73,7 @@ class CareerCategoryNodeService:
         values = list(result.get("career_urls") or [])
         if result.get("career_url"):
             values.insert(0, result["career_url"])
-        return self._dedupe_urls(values)
+        return self._filter_ignored_candidates(ref["registered_domain"], self._dedupe_urls(values))
 
     def _shared_search_result(self, registered_domain: str) -> dict[str, Any]:
         task = self._domain_tasks.find_one(
@@ -79,6 +82,21 @@ class CareerCategoryNodeService:
         )
         result = (task or {}).get("result") or {}
         return result if isinstance(result, dict) else {}
+
+    def _filter_ignored_candidates(self, registered_domain: str, values: list[str]) -> list[str]:
+        ignored = self._ignored_candidate_urls(registered_domain)
+        return [url for url in values if self._normalize_url(url) not in ignored]
+
+    def _ignored_candidate_urls(self, registered_domain: str) -> set[str]:
+        task = self._domain_tasks.find_one(
+            {"registered_domain": registered_domain},
+            {"career_candidate_ignore_urls.url": 1},
+        )
+        ignored = (task or {}).get("career_candidate_ignore_urls") or []
+        return {self._normalize_url(item.get("url")) for item in ignored if isinstance(item, dict)}
+
+    def _normalize_url(self, value: Any) -> str:
+        return str(value or "").strip().rstrip("/")
 
     def _dedupe_urls(self, values: list[Any]) -> list[str]:
         seen: set[str] = set()
@@ -91,11 +109,11 @@ class CareerCategoryNodeService:
             result.append(url)
         return result
 
-    def _dispatch_tasks(self, tasks: list[dict[str, Any]]) -> None:
+    def _dispatch_tasks(self, process_id: str, tasks: list[dict[str, Any]]) -> None:
         for task in tasks:
-            self._dispatch_task(task)
+            self._dispatch_task(process_id, task)
 
-    def _dispatch_task(self, task: dict[str, Any]) -> None:
+    def _dispatch_task(self, process_id: str, task: dict[str, Any]) -> None:
         from infrastructure.tasks import run_career_category_node
 
         log_event(
@@ -103,11 +121,11 @@ class CareerCategoryNodeService:
             "info",
             "career_category_domain_dispatched",
             domain="career_category",
-            process_id=task["process_id"],
+            process_id=process_id,
             registered_domain=task["registered_domain"],
         )
         run_career_category_node.apply_async(
-            args=[task["process_id"], task["registered_domain"]],
+            args=[process_id, task["registered_domain"]],
             queue="processes",
         )
 

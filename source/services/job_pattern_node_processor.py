@@ -6,13 +6,15 @@ from datetime import datetime, timezone
 from typing import Any
 
 from core.config import Settings, get_settings
-from nodes.career_page_category import career_page_category_node
 from services.grid_session import (
     attach_playwright_to_cdp,
     close_browser_attachment,
     close_session_via_http_async,
     create_session_async,
 )
+from services.job_listing_pattern_store import next_pattern_version, pattern_signature
+from services.job_pattern.job_main import main as generate_job_listing_pattern
+from services.navigation import navigate_to_url
 from services.openai_service import reset_openai_runtime_config, set_openai_runtime_config
 from services.selenium_session_heartbeat import SeleniumSessionHeartbeat
 from services.selenium_session_slot_service import get_selenium_session_slot_service
@@ -20,18 +22,18 @@ from services.sync_mongodb_service import SyncMongoDBService, get_sync_mongodb_s
 from utils.logging import get_logger, log_event
 
 
-logger = get_logger("career_category_node_processor")
+logger = get_logger("job_pattern_node_processor")
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-class NoCareerCategorySessionSlotAvailable(RuntimeError):
+class NoJobPatternSessionSlotAvailable(RuntimeError):
     pass
 
 
-class CareerCategoryNodeProcessor:
+class JobPatternNodeProcessor:
     def __init__(self, mongodb: SyncMongoDBService | None = None, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
         self._mongodb = mongodb or get_sync_mongodb_service()
@@ -42,7 +44,7 @@ class CareerCategoryNodeProcessor:
         self,
         task: dict[str, Any],
         *,
-        process_id: str | None,
+        process_id: str,
         worker_name: str,
         celery_task_id: str,
     ) -> dict[str, Any]:
@@ -57,13 +59,7 @@ class CareerCategoryNodeProcessor:
             reset_openai_runtime_config(tokens)
             self._release_slot(slot)
 
-    def _claim_slot(
-        self,
-        task: dict[str, Any],
-        process_id: str | None,
-        worker_name: str,
-        celery_task_id: str,
-    ) -> dict[str, Any]:
+    def _claim_slot(self, task: dict[str, Any], process_id: str, worker_name: str, celery_task_id: str) -> dict[str, Any]:
         slot = get_selenium_session_slot_service().claim_slot(
             worker_name,
             celery_task_id,
@@ -71,7 +67,7 @@ class CareerCategoryNodeProcessor:
             registered_domain=task["registered_domain"],
         )
         if not slot:
-            raise NoCareerCategorySessionSlotAvailable("No Selenium session slot is currently available")
+            raise NoJobPatternSessionSlotAvailable("No Selenium session slot is currently available")
         return slot
 
     def _set_client_openai_config(self, process_id: str | None):
@@ -92,16 +88,10 @@ class CareerCategoryNodeProcessor:
         browser_session = None
         with SeleniumSessionHeartbeat(slot["slot_id"]):
             try:
-                self._log_session_create_started(task, slot)
                 session = await self._create_selenium_session(slot)
-                self._log_session_created(task, slot, session.session_id)
-                self._heartbeat(slot)
                 browser_session = await self._attach_browser(session.cdp_url)
-                self._log_browser_attached(task, session.session_id)
-                self._heartbeat(slot)
-                node_result = await self._run_category_node(task, browser_session, slot)
-                self._heartbeat(slot)
-                return self._result(task, slot, node_result, time.monotonic() - started)
+                patterns = await self._generate_patterns(task, browser_session, slot)
+                return self._result(task, patterns, time.monotonic() - started)
             finally:
                 await close_browser_attachment(browser_session)
                 await self._close_selenium_session(slot, session)
@@ -109,7 +99,7 @@ class CareerCategoryNodeProcessor:
     async def _create_selenium_session(self, slot: dict[str, Any]):
         session = await create_session_async(grid_url=slot["grid_url"], reuse_existing=False)
         if not session or not session.cdp_url:
-            raise NoCareerCategorySessionSlotAvailable("Could not create Selenium session for category node")
+            raise NoJobPatternSessionSlotAvailable("Could not create Selenium session for job pattern node")
         return session
 
     async def _attach_browser(self, cdp_url: str):
@@ -118,90 +108,71 @@ class CareerCategoryNodeProcessor:
             raise RuntimeError("Could not attach Playwright to Selenium session")
         return browser_session
 
-    async def _run_category_node(self, task: dict[str, Any], browser_session: Any, slot: dict[str, Any]) -> dict[str, Any]:
-        career_urls = list(task.get("input", {}).get("career_urls") or [])
-        self._log_started(task, career_urls)
-        return await career_page_category_node(
-            career_urls,
-            browser_session,
+    async def _generate_patterns(self, task: dict[str, Any], browser_session: Any, slot: dict[str, Any]) -> list[dict[str, Any]]:
+        results = []
+        for candidate in task.get("input", {}).get("job_listing_patterns") or []:
+            results.append(await self._generate_pattern(candidate, browser_session, slot))
+        return results
+
+    async def _generate_pattern(self, candidate: dict[str, Any], browser_session: Any, slot: dict[str, Any]) -> dict[str, Any]:
+        page_url = str(candidate.get("page_url") or "").strip()
+        self._log_started(page_url)
+        navigation = await navigate_to_url(
+            browser_session.page,
             agent_index=int(slot.get("session_index") or 0),
-            agent_tab={"handle": None},
+            tab_handle=None,
+            url=page_url,
+            post_navigation_delay_ms=self._settings.post_navigation_delay_ms,
         )
-
-    async def _close_selenium_session(self, slot: dict[str, Any], session: Any) -> None:
-        if session is None:
-            return
-        await close_session_via_http_async(slot["grid_url"], session.session_id)
-
-    def _result(
-        self,
-        task: dict[str, Any],
-        slot: dict[str, Any],
-        node_result: dict[str, Any],
-        duration_seconds: float,
-    ) -> dict[str, Any]:
-        overview = node_result.get("overview") or {}
+        self._heartbeat(slot)
+        if navigation.get("status") != "navigated":
+            return {**candidate, "status": "pattern_generation_failed", "last_error": navigation.get("error") or navigation.get("status"), "generated_at": _now_iso()}
+        pattern_result = await generate_job_listing_pattern(
+            browser_session.page,
+            url=page_url,
+            example_jobs=candidate.get("example_jobs") or [],
+        )
+        self._heartbeat(slot)
+        status = pattern_result.get("status")
+        validation = pattern_result.get("validation") or {}
+        pattern = pattern_result.get("pattern")
         return {
-            "node": "career_page_category",
-            "processor": "career_category_node",
+            **candidate,
+            "status": status,
+            "pattern": pattern,
+            "job_count": len(pattern_result.get("jobs") or []),
+            "example_jobs": list(pattern_result.get("example_jobs") or candidate.get("example_jobs") or [])[:2],
+            "validation": validation,
+            "diagnostics": pattern_result.get("diagnostics"),
+            "generated_at": pattern_result.get("generated_at") or _now_iso(),
+            "last_validated_at": _now_iso(),
+            "pattern_version": next_pattern_version(candidate),
+            "pattern_signature": pattern_signature(pattern),
+            "page_fingerprint": pattern_result.get("page_fingerprint"),
+            "generation_attempts": len(pattern_result.get("attempts") or []),
+            "last_error": None if status == "pattern_ready" else self._validation_error(validation),
+        }
+
+    def _result(self, task: dict[str, Any], patterns: list[dict[str, Any]], duration_seconds: float) -> dict[str, Any]:
+        status = "completed" if any(item.get("status") == "pattern_ready" for item in patterns) else "failed"
+        return {
+            "node": "job_pattern",
+            "processor": "job_pattern_node",
             "domain": task.get("domain"),
             "registered_domain": task["registered_domain"],
-            "career_urls": list(task.get("input", {}).get("career_urls") or []),
-            "overview": overview,
-            "career_pages_analysis": node_result.get("career_pages_analysis") or [],
-            "job_listing_patterns": node_result.get("job_listing_patterns") or [],
-            "outcome": overview.get("outcome"),
-            "jobs_found": bool(overview.get("jobs_found")),
-            "total_jobs_found": int(overview.get("total_jobs_found") or 0),
+            "status": status,
+            "job_listing_patterns": patterns,
             "duration_seconds": round(duration_seconds, 3),
-            "selenium_node_id": slot["selenium_node_id"],
-            "selenium_session_slot_id": slot["slot_id"],
-            "session_index": slot["session_index"],
             "processed_at": _now_iso(),
         }
 
-    def _log_started(self, task: dict[str, Any], career_urls: list[str]) -> None:
-        log_event(
-            logger,
-            "info",
-            "career_category_node_started",
-            domain="career_category",
-            registered_domain=task["registered_domain"],
-            career_url_count=len(career_urls),
-        )
+    def _validation_error(self, validation: dict[str, Any]) -> str:
+        problems = [str(problem) for problem in validation.get("problems") or [] if str(problem).strip()]
+        return " | ".join(problems) or "Pattern validation failed"
 
-    def _log_session_create_started(self, task: dict[str, Any], slot: dict[str, Any]) -> None:
-        log_event(
-            logger,
-            "info",
-            "career_category_session_create_started",
-            domain="career_category",
-            registered_domain=task["registered_domain"],
-            selenium_node_id=slot["selenium_node_id"],
-            slot_id=slot["slot_id"],
-        )
-
-    def _log_session_created(self, task: dict[str, Any], slot: dict[str, Any], session_id: str) -> None:
-        log_event(
-            logger,
-            "info",
-            "career_category_session_created",
-            domain="career_category",
-            registered_domain=task["registered_domain"],
-            selenium_node_id=slot["selenium_node_id"],
-            slot_id=slot["slot_id"],
-            selenium_session_id=session_id,
-        )
-
-    def _log_browser_attached(self, task: dict[str, Any], session_id: str) -> None:
-        log_event(
-            logger,
-            "info",
-            "career_category_browser_attached",
-            domain="career_category",
-            registered_domain=task["registered_domain"],
-            selenium_session_id=session_id,
-        )
+    async def _close_selenium_session(self, slot: dict[str, Any], session: Any) -> None:
+        if session is not None:
+            await close_session_via_http_async(slot["grid_url"], session.session_id)
 
     def _mark_slot_stale(self, slot: dict[str, Any], error: str) -> None:
         get_selenium_session_slot_service().mark_slot_stale(slot["slot_id"], error)
@@ -211,3 +182,6 @@ class CareerCategoryNodeProcessor:
 
     def _heartbeat(self, slot: dict[str, Any]) -> None:
         get_selenium_session_slot_service().heartbeat_slot(slot["slot_id"])
+
+    def _log_started(self, page_url: str) -> None:
+        log_event(logger, "info", "job_pattern_generation_started", domain="job_pattern", page_url=page_url)

@@ -408,7 +408,12 @@ async def recreate_tab_in_session(session: BrowserSession) -> BrowserSession | N
         return None
 
 
-async def attach_playwright_to_cdp(cdp_url: str, *, retries: int = 4) -> BrowserSession | None:
+async def attach_playwright_to_cdp(
+    cdp_url: str,
+    *,
+    retries: int = 6,
+    raise_on_failure: bool = False,
+) -> BrowserSession | None:
     if async_playwright is None:
         log_event(logger, "error", "playwright_not_installed", domain="browser")
         return None
@@ -417,6 +422,8 @@ async def attach_playwright_to_cdp(cdp_url: str, *, retries: int = 4) -> Browser
     for attempt in range(retries):
         playwright = None
         try:
+            if attempt == 0:
+                await asyncio.sleep(0.5)
             playwright = await async_playwright().start()
             browser = await playwright.chromium.connect_over_cdp(cdp_url, timeout=30_000)
             contexts = browser.contexts
@@ -468,16 +475,19 @@ async def attach_playwright_to_cdp(cdp_url: str, *, retries: int = 4) -> Browser
                 )
                 await asyncio.sleep(backoff)
 
+    error_message = str(last_exc)
     log_event(
         logger,
         "error",
         "playwright_attach_failed_all_retries retries=%s error=%s",
         retries,
-        str(last_exc),
+        error_message,
         domain=cdp_url,
         cdp_url=cdp_url,
-        error=str(last_exc),
+        error=error_message,
     )
+    if raise_on_failure:
+        raise RuntimeError(f"Could not attach Playwright to Selenium session: {error_message}")
     return None
 
 
