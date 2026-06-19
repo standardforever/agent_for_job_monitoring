@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from services.carrer_url_extractor import UrlExtractor
@@ -9,6 +9,21 @@ from services.flow_safety import extract_base_domain
 from utils.logging import get_logger, log_event
 
 logger = get_logger("url_extraction_node")
+
+
+def _send_heartbeat(heartbeat: Callable[[], None] | None) -> None:
+    if heartbeat is None:
+        return
+    try:
+        heartbeat()
+    except Exception:
+        log_event(
+            logger,
+            "warning",
+            "url_extraction_heartbeat_failed",
+            domain="url_extraction",
+            exc_info=True,
+        )
 
 
 def _dedupe_urls(values: list[str]) -> list[str]:
@@ -75,6 +90,7 @@ async def career_url_extraction_node(
     browser_session: Any,
     *,
     registered_domain: str | None = None,
+    heartbeat: Callable[[], None] | None = None,
 ) -> dict:
     log_event(
         logger,
@@ -94,6 +110,7 @@ async def career_url_extraction_node(
 
     url_no_www, url_with_www = _normalize_input_target(navigate_to)
     extractor = UrlExtractor(browser_session.page)
+    _send_heartbeat(heartbeat)
 
     # Try without www first, then fall back to with www
     fallback_urls = await extractor.discover_job_urls_from_domain(
@@ -102,6 +119,7 @@ async def career_url_extraction_node(
         extract_from_homepage=True,
         filter_domain=registered_domain,
     )
+    _send_heartbeat(heartbeat)
 
     active_url = url_no_www
     if not fallback_urls.get("success"):
@@ -120,6 +138,7 @@ async def career_url_extraction_node(
             filter_domain=registered_domain,
         )
         active_url = url_with_www
+        _send_heartbeat(heartbeat)
     
 
     fallback_meta = dict(fallback_urls.get("meta_data", {}) or {})
@@ -167,9 +186,11 @@ async def career_url_extraction_node(
 
     
     non_domain_careers_result = await extractor._extract_career_urls_from_page(active_url)
+    _send_heartbeat(heartbeat)
     search_domain = _search_domain_text(registered_domain or navigate_to)
     search_query = f"{search_domain} jobs careers vacancies openings"
     search_result = await extractor.search_duckduckgo(search_query, registered_domain or navigate_to)
+    _send_heartbeat(heartbeat)
     return_dict["diagnostics"]["search_query"] = search_query
     return_dict["diagnostics"]["homepage_status"] = fallback_urls.get("status")
     return_dict["diagnostics"]["search_status"] = search_result.get("status")

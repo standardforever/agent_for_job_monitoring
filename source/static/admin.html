@@ -418,7 +418,10 @@
       <div class="panel wide">
         <div class="toolbar">
           <h2>Process uploads</h2>
-          <button class="secondary" id="refreshProcessesButton" type="button">Refresh</button>
+          <div class="actions" style="margin-top: 0;">
+            <button class="primary" id="runAllPipelinesButton" type="button">Run all pipelines</button>
+            <button class="secondary" id="refreshProcessesButton" type="button">Refresh</button>
+          </div>
         </div>
         <form id="uploadForm" class="form-grid">
           <label>
@@ -473,6 +476,7 @@
       processFileInput: document.querySelector("#processFileInput"),
       uploadButton: document.querySelector("#uploadButton"),
       refreshProcessesButton: document.querySelector("#refreshProcessesButton"),
+      runAllPipelinesButton: document.querySelector("#runAllPipelinesButton"),
       processList: document.querySelector("#processList"),
     };
 
@@ -592,7 +596,12 @@
       const action = processActionState(process);
       const categoryAction = categoryActionState(process);
       const jobPatternAction = jobPatternActionState(process);
+      const jobPatternForceAction = jobPatternForceActionState(process);
+      const jobPaginationAction = jobPaginationActionState(process);
+      const jobPaginationForceAction = jobPaginationForceActionState(process);
       const jobExtractionAction = jobExtractionActionState(process);
+      const jobExtractionForceAction = jobExtractionForceActionState(process);
+      const pipelineAction = pipelineActionState(process);
       return `
         <article class="client-card">
           <header>
@@ -603,12 +612,34 @@
                 <span>Status: ${escapeHtml(process.status || "")}</span>
                 <span>Career: ${escapeHtml(process.career_status || "not started")}</span>
                 <span>Pattern: ${escapeHtml(process.job_pattern_status || "not started")}</span>
+                <span>Pagination: ${escapeHtml(process.job_pagination_status || "not started")}</span>
                 <span>Jobs: ${escapeHtml(process.job_extraction_status || "not started")}</span>
+                <span>Pipeline: ${escapeHtml(pipelineLabel(process))}</span>
                 <span>Agents: ${escapeHtml(process.agent_count || "")}</span>
                 <span>Domains: ${escapeHtml(process.totals?.domains || 0)}</span>
               </div>
             </div>
             <div class="actions" style="margin-top: 0;">
+              <button
+                class="${pipelineAction.enabled ? "primary" : "secondary"}"
+                type="button"
+                data-action="run-pipeline"
+                data-process="${escapeAttr(process.process_id)}"
+                ${pipelineAction.enabled ? "" : "disabled"}
+              >${escapeHtml(pipelineAction.label)}</button>
+              <button
+                class="secondary"
+                type="button"
+                data-action="${process.pipeline_enabled === false ? "resume-pipeline" : "pause-pipeline"}"
+                data-process="${escapeAttr(process.process_id)}"
+              >${process.pipeline_enabled === false ? "Resume pipeline" : "Pause pipeline"}</button>
+              <button
+                class="secondary"
+                type="button"
+                data-action="build-alert"
+                data-process="${escapeAttr(process.process_id)}"
+                ${process.pipeline_last_report ? "" : "disabled"}
+              >Build alert</button>
               <button
                 class="${action.enabled ? "primary" : "secondary"}"
                 type="button"
@@ -627,16 +658,50 @@
                 class="${jobPatternAction.enabled ? "primary" : "secondary"}"
                 type="button"
                 data-action="start-job-pattern-node"
+                data-mode="${escapeAttr(jobPatternAction.mode)}"
                 data-process="${escapeAttr(process.process_id)}"
                 ${jobPatternAction.enabled ? "" : "disabled"}
               >${escapeHtml(jobPatternAction.label)}</button>
               <button
+                class="${jobPatternForceAction.enabled ? "secondary" : "secondary"}"
+                type="button"
+                data-action="start-job-pattern-node"
+                data-mode="force"
+                data-process="${escapeAttr(process.process_id)}"
+                ${jobPatternForceAction.enabled ? "" : "disabled"}
+              >${escapeHtml(jobPatternForceAction.label)}</button>
+              <button
+                class="${jobPaginationAction.enabled ? "primary" : "secondary"}"
+                type="button"
+                data-action="start-job-pagination-node"
+                data-mode="${escapeAttr(jobPaginationAction.mode)}"
+                data-process="${escapeAttr(process.process_id)}"
+                ${jobPaginationAction.enabled ? "" : "disabled"}
+              >${escapeHtml(jobPaginationAction.label)}</button>
+              <button
+                class="secondary"
+                type="button"
+                data-action="start-job-pagination-node"
+                data-mode="force"
+                data-process="${escapeAttr(process.process_id)}"
+                ${jobPaginationForceAction.enabled ? "" : "disabled"}
+              >${escapeHtml(jobPaginationForceAction.label)}</button>
+              <button
                 class="${jobExtractionAction.enabled ? "primary" : "secondary"}"
                 type="button"
                 data-action="start-job-extraction-node"
+                data-mode="${escapeAttr(jobExtractionAction.mode)}"
                 data-process="${escapeAttr(process.process_id)}"
                 ${jobExtractionAction.enabled ? "" : "disabled"}
               >${escapeHtml(jobExtractionAction.label)}</button>
+              <button
+                class="secondary"
+                type="button"
+                data-action="start-job-extraction-node"
+                data-mode="force"
+                data-process="${escapeAttr(process.process_id)}"
+                ${jobExtractionForceAction.enabled ? "" : "disabled"}
+              >${escapeHtml(jobExtractionForceAction.label)}</button>
             </div>
           </header>
           <div class="emails">
@@ -645,8 +710,11 @@
             <span class="chip ok">${stats.loaded} career found</span>
             <span class="chip bad">${stats.failed} failed</span>
             <span class="chip">${stats.rate}% success</span>
+            <span class="chip">${escapeHtml(nextPipelineRunLabel(process))}</span>
+            ${renderAlertSummary(process)}
             ${renderCareerTotals(process)}
             ${renderJobPatternTotals(process)}
+            ${renderJobPaginationTotals(process)}
             ${renderJobExtractionTotals(process)}
           </div>
           ${renderCompletedResults(process)}
@@ -662,6 +730,39 @@
         return { enabled: true, label: "Rerun search" };
       }
       return { enabled: true, label: "Start search" };
+    }
+
+    function pipelineActionState(process) {
+      if (process.pipeline_enabled === false) {
+        return { enabled: false, label: "Pipeline paused" };
+      }
+      if ((process.pipeline_status || "") === "running") {
+        return { enabled: false, label: "Pipeline running" };
+      }
+      return { enabled: true, label: "Run pipeline" };
+    }
+
+    function pipelineLabel(process) {
+      const status = process.pipeline_status || "idle";
+      return process.pipeline_enabled === false ? `${status} paused` : status;
+    }
+
+    function nextPipelineRunLabel(process) {
+      if (process.pipeline_enabled === false) {
+        return "Pipeline paused";
+      }
+      if (!process.next_pipeline_run_at) {
+        return "Pipeline not scheduled";
+      }
+      return `Next pipeline: ${formatDate(process.next_pipeline_run_at)}`;
+    }
+
+    function formatDate(value) {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) {
+        return "";
+      }
+      return date.toLocaleString();
     }
 
     function categoryActionState(process) {
@@ -684,26 +785,85 @@
 
     function jobPatternActionState(process) {
       if (isJobPatternActive(process)) {
-        return { enabled: false, label: "Pattern running" };
+        return { enabled: false, mode: "start", label: "Pattern running" };
       }
       if (!["completed", "partial_completed"].includes(process.career_status || "")) {
-        return { enabled: false, label: "Pattern waits" };
+        return { enabled: false, mode: "start", label: "Pattern waits" };
       }
-      return { enabled: true, label: isNodeStarted(process.job_pattern_status) ? "Rerun patterns" : "Create patterns" };
+      return {
+        enabled: true,
+        mode: isNodeStarted(process.job_pattern_status) ? "rerun" : "start",
+        label: isNodeStarted(process.job_pattern_status) ? "Repair patterns" : "Create patterns",
+      };
+    }
+
+    function jobPatternForceActionState(process) {
+      if (isJobPatternActive(process)) {
+        return { enabled: false, label: "Force patterns" };
+      }
+      if (!["completed", "partial_completed"].includes(process.career_status || "")) {
+        return { enabled: false, label: "Force patterns" };
+      }
+      return { enabled: isNodeStarted(process.job_pattern_status), label: "Force patterns" };
     }
 
     function isJobPatternActive(process) {
       return ["queued", "running"].includes(process.job_pattern_status || "");
     }
 
-    function jobExtractionActionState(process) {
-      if (isJobExtractionActive(process)) {
-        return { enabled: false, label: "Jobs running" };
+    function jobPaginationActionState(process) {
+      if (isJobPaginationActive(process)) {
+        return { enabled: false, mode: "start", label: "Pagination running" };
       }
       if (!["completed", "partial_completed"].includes(process.job_pattern_status || "")) {
-        return { enabled: false, label: "Jobs wait" };
+        return { enabled: false, mode: "start", label: "Pagination waits" };
       }
-      return { enabled: true, label: isNodeStarted(process.job_extraction_status) ? "Rerun jobs" : "Extract jobs" };
+      return {
+        enabled: true,
+        mode: isNodeStarted(process.job_pagination_status) ? "rerun" : "start",
+        label: isNodeStarted(process.job_pagination_status) ? "Refresh pagination" : "Run pagination",
+      };
+    }
+
+    function jobPaginationForceActionState(process) {
+      if (isJobPaginationActive(process)) {
+        return { enabled: false, label: "Force pagination" };
+      }
+      if (!["completed", "partial_completed"].includes(process.job_pattern_status || "")) {
+        return { enabled: false, label: "Force pagination" };
+      }
+      return { enabled: isNodeStarted(process.job_pagination_status), label: "Force pagination" };
+    }
+
+    function isJobPaginationActive(process) {
+      return ["queued", "running"].includes(process.job_pagination_status || "");
+    }
+
+    function jobExtractionActionState(process) {
+      if (isJobExtractionActive(process)) {
+        return { enabled: false, mode: "start", label: "Jobs running" };
+      }
+      if (isJobPaginationActive(process)) {
+        return { enabled: false, mode: "start", label: "Jobs wait" };
+      }
+      if (!["completed", "partial_completed"].includes(process.job_pattern_status || "")) {
+        return { enabled: false, mode: "start", label: "Jobs wait" };
+      }
+      return {
+        enabled: true,
+        mode: isNodeStarted(process.job_extraction_status) ? "rerun" : "start",
+        label: isNodeStarted(process.job_extraction_status) ? "Refresh jobs" : "Extract jobs",
+      };
+    }
+
+    function jobExtractionForceActionState(process) {
+      if (isJobExtractionActive(process) || isJobPaginationActive(process)) {
+        return { enabled: false, label: "Force jobs" };
+      }
+      if (!["completed", "partial_completed"].includes(process.job_pattern_status || "")) {
+        return { enabled: false, label: "Force jobs" };
+      }
+      return { enabled: isNodeStarted(process.job_extraction_status), label: "Force jobs" };
     }
 
     function isJobExtractionActive(process) {
@@ -730,12 +890,29 @@
       return renderNodeTotalsChip("Patterns", process.job_pattern_status, totals, "no listing");
     }
 
+    function renderJobPaginationTotals(process) {
+      const totals = process.job_pagination_totals || null;
+      if (!totals) {
+        return "";
+      }
+      return renderNodeTotalsChip("Pagination", process.job_pagination_status, totals, "no pagination");
+    }
+
     function renderJobExtractionTotals(process) {
       const totals = process.job_extraction_totals || null;
       if (!totals) {
         return "";
       }
       return renderNodeTotalsChip("Jobs", process.job_extraction_status, totals);
+    }
+
+    function renderAlertSummary(process) {
+      const alert = process.alert_last_summary || null;
+      if (!alert) {
+        return "";
+      }
+      const delivery = alert.delivery?.status || "pending";
+      return `<span class="chip">Alert ${escapeHtml(alert.status || "")}: ${escapeHtml(alert.total_relevant_jobs || 0)}/${escapeHtml(alert.total_new_jobs || 0)} relevant, ${escapeHtml(delivery)}</span>`;
     }
 
     function renderNodeTotalsChip(label, status, totals, blockedLabel = "blocked") {
@@ -995,15 +1172,16 @@
       }
     }
 
-    async function startJobPattern(processId, button = null) {
+    async function startJobPattern(processId, button = null, mode = "start") {
       if (button) {
         button.disabled = true;
       }
       try {
-        const data = await request(`/nodes/job-pattern/processes/${encodeURIComponent(processId)}/start`, {
+        const action = mode === "force" ? "force" : mode === "rerun" ? "rerun" : "start";
+        const data = await request(`/nodes/job-pattern/processes/${encodeURIComponent(processId)}/${action}`, {
           method: "POST",
         });
-        showNotice(`Job pattern node started: ${data.enqueued} domain tasks queued.`);
+        showNotice(`Job pattern ${data.mode || action} started: ${data.enqueued} domain tasks queued, ${data.reused || 0} reused.`);
       } catch (error) {
         showNotice(error.message, "bad");
       } finally {
@@ -1011,15 +1189,91 @@
       }
     }
 
-    async function startJobExtraction(processId, button = null) {
+    async function startJobPagination(processId, button = null, mode = "start") {
       if (button) {
         button.disabled = true;
       }
       try {
-        const data = await request(`/nodes/job-extraction/processes/${encodeURIComponent(processId)}/start`, {
+        const action = mode === "force" ? "force" : mode === "rerun" ? "rerun" : "start";
+        const data = await request(`/nodes/job-pagination/processes/${encodeURIComponent(processId)}/${action}`, {
           method: "POST",
         });
-        showNotice(`Job extraction node started: ${data.enqueued} domain tasks queued.`);
+        showNotice(`Job pagination ${data.mode || action} started: ${data.enqueued} domain tasks queued, ${data.reused || 0} reused.`);
+      } catch (error) {
+        showNotice(error.message, "bad");
+      } finally {
+        await loadProcesses();
+      }
+    }
+
+    async function startJobExtraction(processId, button = null, mode = "start") {
+      if (button) {
+        button.disabled = true;
+      }
+      try {
+        const action = mode === "force" ? "force" : mode === "rerun" ? "rerun" : "start";
+        const data = await request(`/nodes/job-extraction/processes/${encodeURIComponent(processId)}/${action}`, {
+          method: "POST",
+        });
+        showNotice(`Job extraction ${data.mode || action} started: ${data.enqueued} domain tasks queued, ${data.reused || 0} reused.`);
+      } catch (error) {
+        showNotice(error.message, "bad");
+      } finally {
+        await loadProcesses();
+      }
+    }
+
+    async function runPipeline(processId, button = null) {
+      if (button) {
+        button.disabled = true;
+      }
+      try {
+        const data = await request(`/pipelines/processes/${encodeURIComponent(processId)}/run`, {
+          method: "POST",
+        });
+        showNotice(`Pipeline started: ${data.pipeline_run_id}`);
+      } catch (error) {
+        showNotice(error.message, "bad");
+      } finally {
+        await loadProcesses();
+      }
+    }
+
+    async function runAllPipelines() {
+      elements.runAllPipelinesButton.disabled = true;
+      try {
+        const data = await request("/pipelines/run-all", { method: "POST" });
+        showNotice(`Pipelines started: ${data.count || 0}, skipped: ${(data.skipped || []).length}.`);
+      } catch (error) {
+        showNotice(error.message, "bad");
+      } finally {
+        elements.runAllPipelinesButton.disabled = false;
+        await loadProcesses();
+      }
+    }
+
+    async function setPipelinePaused(processId, paused, button = null) {
+      if (button) {
+        button.disabled = true;
+      }
+      try {
+        const action = paused ? "pause" : "resume";
+        await request(`/pipelines/processes/${encodeURIComponent(processId)}/${action}`, { method: "POST" });
+        showNotice(paused ? "Pipeline paused." : "Pipeline resumed and scheduled.");
+      } catch (error) {
+        showNotice(error.message, "bad");
+      } finally {
+        await loadProcesses();
+      }
+    }
+
+    async function buildAlert(processId, button = null) {
+      if (button) {
+        button.disabled = true;
+      }
+      try {
+        const data = await request(`/alerts/processes/${encodeURIComponent(processId)}/build`, { method: "POST" });
+        showNotice(`Alert ready: ${data.total_relevant_jobs || 0}/${data.total_new_jobs || 0} relevant jobs.`);
       } catch (error) {
         showNotice(error.message, "bad");
       } finally {
@@ -1060,6 +1314,7 @@
     elements.resetButton.addEventListener("click", resetForm);
     elements.refreshButton.addEventListener("click", loadClients);
     elements.refreshProcessesButton.addEventListener("click", loadProcesses);
+    elements.runAllPipelinesButton.addEventListener("click", runAllPipelines);
     elements.savePasswordButton.addEventListener("click", savePassword);
     elements.clearPasswordButton.addEventListener("click", clearPassword);
     elements.clientList.addEventListener("click", (event) => {
@@ -1083,14 +1338,29 @@
       if (button.dataset.action === "start-search-node") {
         startProcess(button.dataset.process, button);
       }
+      if (button.dataset.action === "run-pipeline") {
+        runPipeline(button.dataset.process, button);
+      }
+      if (button.dataset.action === "pause-pipeline") {
+        setPipelinePaused(button.dataset.process, true, button);
+      }
+      if (button.dataset.action === "build-alert") {
+        buildAlert(button.dataset.process, button);
+      }
+      if (button.dataset.action === "resume-pipeline") {
+        setPipelinePaused(button.dataset.process, false, button);
+      }
       if (button.dataset.action === "start-career-category-node") {
         startCareerCategory(button.dataset.process, button);
       }
       if (button.dataset.action === "start-job-pattern-node") {
-        startJobPattern(button.dataset.process, button);
+        startJobPattern(button.dataset.process, button, button.dataset.mode || "start");
+      }
+      if (button.dataset.action === "start-job-pagination-node") {
+        startJobPagination(button.dataset.process, button, button.dataset.mode || "start");
       }
       if (button.dataset.action === "start-job-extraction-node") {
-        startJobExtraction(button.dataset.process, button);
+        startJobExtraction(button.dataset.process, button, button.dataset.mode || "start");
       }
     });
 

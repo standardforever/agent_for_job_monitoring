@@ -4,10 +4,12 @@ import time
 from typing import Any
 
 from core.config import get_settings
-from infrastructure.tasks import run_career_category_node, run_job_extraction_node, run_job_pattern_node, run_search_node
+from infrastructure.tasks import run_career_category_node, run_job_extraction_node, run_job_pagination_node, run_job_pattern_node, run_search_node
 from services.career_process_service import get_career_process_service
 from services.job_extraction_node_service import get_job_extraction_node_service
+from services.job_pagination_node_service import get_job_pagination_node_service
 from services.job_pattern_node_service import get_job_pattern_node_service
+from services.pipeline_orchestrator_service import get_pipeline_orchestrator_service
 from services.process_runtime_service import get_process_runtime_service
 from services.selenium_session_slot_service import get_selenium_session_slot_service
 from services.sync_mongodb_service import get_sync_mongodb_service
@@ -30,11 +32,15 @@ def run_once() -> None:
     _repair_stale_processes()
     _repair_stale_career_processes()
     _repair_stale_job_pattern_processes()
+    _repair_stale_job_pagination_processes()
     _repair_stale_job_extraction_processes()
+    _repair_stale_pipeline_runs()
     _enqueue_waiting_domains()
     _enqueue_waiting_category_tasks()
     _enqueue_waiting_job_pattern_tasks()
+    _enqueue_waiting_job_pagination_tasks()
     _enqueue_waiting_job_extraction_tasks()
+    _enqueue_due_pipelines()
 
 
 def _repair_stale_processes() -> None:
@@ -50,8 +56,20 @@ def _repair_stale_job_extraction_processes() -> None:
     get_job_extraction_node_service().requeue_stale_tasks()
 
 
+def _repair_stale_job_pagination_processes() -> None:
+    get_job_pagination_node_service().requeue_stale_tasks()
+
+
 def _repair_stale_job_pattern_processes() -> None:
     get_job_pattern_node_service().requeue_stale_tasks()
+
+
+def _repair_stale_pipeline_runs() -> None:
+    get_pipeline_orchestrator_service().repair_stale_runs()
+
+
+def _enqueue_due_pipelines() -> None:
+    get_pipeline_orchestrator_service().start_due_pipelines()
 
 
 def _processes_with_processing_domains() -> list[dict[str, Any]]:
@@ -70,8 +88,11 @@ def _processes_with_queued_domains() -> list[dict[str, Any]]:
 
 
 def _enqueue_process_domains(process: dict[str, Any]) -> None:
-    refs = get_process_runtime_service().dispatchable_refs(process["process_id"])
+    runtime = get_process_runtime_service()
+    refs = runtime.dispatchable_refs(process["process_id"])
     for ref in refs:
+        if not runtime.mark_domain_dispatched(process["process_id"], ref["registered_domain"]):
+            continue
         log_event(
             logger,
             "info",
@@ -90,8 +111,10 @@ def _enqueue_waiting_category_tasks() -> None:
 
 def _enqueue_category_task(task: dict[str, Any]) -> None:
     registered_domain = task["registered_domain"]
-    process_id = _process_id_for_category_domain(registered_domain)
+    process_id = str(task.get("last_process_id") or "") or _process_id_for_category_domain(registered_domain)
     if not process_id:
+        return
+    if not get_career_process_service().mark_task_dispatched(registered_domain):
         return
     log_event(
         logger,
@@ -122,8 +145,10 @@ def _enqueue_waiting_job_extraction_tasks() -> None:
 
 def _enqueue_job_extraction_task(task: dict[str, Any]) -> None:
     registered_domain = task["registered_domain"]
-    process_id = _process_id_for_job_extraction_domain(registered_domain)
+    process_id = str(task.get("last_process_id") or "") or _process_id_for_job_extraction_domain(registered_domain)
     if not process_id:
+        return
+    if not get_job_extraction_node_service().mark_task_dispatched(registered_domain):
         return
     log_event(
         logger,
@@ -141,10 +166,35 @@ def _enqueue_waiting_job_pattern_tasks() -> None:
         _enqueue_job_pattern_task(task)
 
 
+def _enqueue_waiting_job_pagination_tasks() -> None:
+    for task in get_job_pagination_node_service().queued_tasks_for_watchdog():
+        _enqueue_job_pagination_task(task)
+
+
+def _enqueue_job_pagination_task(task: dict[str, Any]) -> None:
+    registered_domain = task["registered_domain"]
+    process_id = str(task.get("last_process_id") or "") or _process_id_for_job_pagination_domain(registered_domain)
+    if not process_id:
+        return
+    if not get_job_pagination_node_service().mark_task_dispatched(registered_domain):
+        return
+    log_event(
+        logger,
+        "info",
+        "watchdog_job_pagination_task_dispatched",
+        domain="watchdog",
+        process_id=process_id,
+        registered_domain=registered_domain,
+    )
+    run_job_pagination_node.apply_async(args=[process_id, registered_domain], queue="processes")
+
+
 def _enqueue_job_pattern_task(task: dict[str, Any]) -> None:
     registered_domain = task["registered_domain"]
-    process_id = _process_id_for_job_pattern_domain(registered_domain)
+    process_id = str(task.get("last_process_id") or "") or _process_id_for_job_pattern_domain(registered_domain)
     if not process_id:
+        return
+    if not get_job_pattern_node_service().mark_task_dispatched(registered_domain):
         return
     log_event(
         logger,
@@ -161,6 +211,17 @@ def _process_id_for_job_pattern_domain(registered_domain: str) -> str | None:
     process = _process_collection().find_one(
         {
             "job_pattern_status": "running",
+            "domains.completed.registered_domain": registered_domain,
+        },
+        {"process_id": 1},
+    )
+    return str((process or {}).get("process_id") or "") or None
+
+
+def _process_id_for_job_pagination_domain(registered_domain: str) -> str | None:
+    process = _process_collection().find_one(
+        {
+            "job_pagination_status": "running",
             "domains.completed.registered_domain": registered_domain,
         },
         {"process_id": 1},

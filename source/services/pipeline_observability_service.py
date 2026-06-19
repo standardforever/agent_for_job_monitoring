@@ -20,6 +20,11 @@ class PipelineObservabilityService:
         self._settings = settings
         self._processes = mongodb.collection(settings.mongodb_process_uploads_collection)
         self._domain_tasks = mongodb.collection(settings.mongodb_process_domain_tasks_collection)
+        self._search_runs = mongodb.collection(settings.mongodb_search_runs_collection)
+        self._category_runs = mongodb.collection(settings.mongodb_career_category_runs_collection)
+        self._pattern_runs = mongodb.collection(settings.mongodb_job_pattern_runs_collection)
+        self._pagination_runs = mongodb.collection(settings.mongodb_job_pagination_runs_collection)
+        self._extraction_runs = mongodb.collection(settings.mongodb_job_extraction_runs_collection)
         self._slots = mongodb.collection(settings.mongodb_selenium_session_slots_collection)
 
     def snapshot(self) -> dict[str, Any]:
@@ -39,7 +44,7 @@ class PipelineObservabilityService:
         return self._count_by_field(self._processes, "status")
 
     def _domain_counts(self) -> dict[str, int]:
-        return self._count_by_field(self._domain_tasks, "status")
+        return self._count_by_field(self._search_runs, "status")
 
     def _slot_counts(self) -> dict[str, int]:
         return self._count_by_field(self._slots, "status")
@@ -54,10 +59,11 @@ class PipelineObservabilityService:
 
     def _node_process_counts(self) -> dict[str, dict[str, int]]:
         return {
-            "search": self._count_by_field(self._processes, "status"),
-            "career_category": self._count_by_field(self._processes, "career_status"),
-            "job_pattern": self._count_by_field(self._processes, "job_pattern_status"),
-            "job_extraction": self._count_by_field(self._processes, "job_extraction_status"),
+            "search": self._count_by_field(self._search_runs, "status"),
+            "career_category": self._count_by_field(self._category_runs, "status"),
+            "job_pattern": self._count_by_field(self._pattern_runs, "status"),
+            "job_pagination": self._count_by_field(self._pagination_runs, "status"),
+            "job_extraction": self._count_by_field(self._extraction_runs, "status"),
         }
 
     def _count_by_field(self, collection: Any, field: str) -> dict[str, int]:

@@ -25,6 +25,17 @@ class SearchNodeService:
         from infrastructure.tasks import run_search_node
 
         registered_domain = ref["registered_domain"]
+        if not get_process_runtime_service().mark_domain_dispatched(process_id, registered_domain):
+            log_event(
+                logger,
+                "info",
+                "search_node_domain_dispatch_skipped",
+                domain="search_node",
+                process_id=process_id,
+                registered_domain=registered_domain,
+                reason="recently_dispatched",
+            )
+            return
         log_event(
             logger,
             "info",

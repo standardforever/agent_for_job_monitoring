@@ -26,6 +26,7 @@ NODE_RETRY_POLICIES: Final = {
     "search": NodeRetryPolicy(max_attempts=2),
     "career_category": NodeRetryPolicy(max_attempts=2),
     "job_pattern": NodeRetryPolicy(max_attempts=1),
+    "job_pagination": NodeRetryPolicy(max_attempts=2),
     "job_extraction": NodeRetryPolicy(max_attempts=3),
 }
 

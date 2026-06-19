@@ -12,6 +12,8 @@ NO_JOBS_FOUND: Final = "no_jobs_found"
 NOT_JOB_RELATED: Final = "not_job_related"
 CONFIG_FAILED: Final = "config_failed"
 QUEUE_FAILED: Final = "queue_failed"
+DISCOVERY_FAILED: Final = "discovery_failed"
+DOMAIN_ACCESS_FAILED: Final = "domain_access_failed"
 UNKNOWN_FAILED: Final = "unknown_failed"
 
 
@@ -25,6 +27,15 @@ def classify_failure(error: str | None) -> str:
         return TIMEOUT
     if "navigation" in normalized or "page load" in normalized or "net::" in normalized:
         return PAGE_LOAD_FAILED
+    if "domain_access_failed" in normalized or "failed to access domain" in normalized:
+        return DOMAIN_ACCESS_FAILED
+    if (
+        "career_page_discovery_failed" in normalized
+        or "search_discovery_failed" in normalized
+        or "no_job_or_career_candidates_found" in normalized
+        or "no_career_page_found" in normalized
+    ):
+        return DISCOVERY_FAILED
     if "openai" in normalized or "api_key" in normalized or "model" in normalized or "llm" in normalized:
         return LLM_FAILED
     if "pattern" in normalized:

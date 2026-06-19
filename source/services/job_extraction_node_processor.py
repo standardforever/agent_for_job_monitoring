@@ -69,6 +69,7 @@ class JobExtractionNodeProcessor:
         try:
             return asyncio.run(self._process_async(task, slot))
         except Exception as exc:
+            self._log_processing_exception(task, slot, exc)
             self._mark_slot_stale(slot, str(exc))
             raise
         finally:
@@ -112,7 +113,9 @@ class JobExtractionNodeProcessor:
             try:
                 self._log_session_create_started(task, slot)
                 session = await self._create_selenium_session(slot)
+                self._heartbeat(slot)
                 browser_session = await self._attach_browser(session.cdp_url)
+                self._heartbeat(slot)
                 results = await self._run_patterns(task, browser_session, slot)
                 return self._result(task, results, time.monotonic() - started)
             finally:
@@ -203,6 +206,7 @@ class JobExtractionNodeProcessor:
             "example_jobs": self._sample_jobs(jobs),
             "validation": validation,
             "diagnostics": diagnostics,
+            "job_extraction_mode": pattern_entry.get("job_extraction_mode"),
             "last_extracted_at": _now_iso(),
         }
 
@@ -227,6 +231,7 @@ class JobExtractionNodeProcessor:
                 "repaired_at": _now_iso(),
                 "previous_pattern_signature": pattern_entry.get("pattern_signature"),
             },
+            "job_extraction_mode": pattern_entry.get("job_extraction_mode"),
             "last_extracted_at": _now_iso(),
         }
 
@@ -244,6 +249,7 @@ class JobExtractionNodeProcessor:
             "validation": validation,
             "diagnostics": diagnostics,
             "inactive_reason": "Loaded page appears to have no current vacancies.",
+            "job_extraction_mode": pattern_entry.get("job_extraction_mode"),
             "last_extracted_at": _now_iso(),
         }
 
@@ -260,6 +266,7 @@ class JobExtractionNodeProcessor:
             "job_count": 0,
             "last_error": error,
             "repair": repair_result,
+            "job_extraction_mode": pattern_entry.get("job_extraction_mode"),
             "last_extracted_at": _now_iso(),
         }
 
@@ -307,6 +314,7 @@ class JobExtractionNodeProcessor:
                     "repair": pattern.get("repair"),
                     "inactive_reason": pattern.get("inactive_reason"),
                     "last_error": pattern.get("last_error"),
+                    "job_extraction_mode": pattern.get("job_extraction_mode"),
                     "generated_at": pattern.get("generated_at"),
                     "last_extracted_at": pattern.get("last_extracted_at"),
                 }
@@ -345,4 +353,19 @@ class JobExtractionNodeProcessor:
             registered_domain=task["registered_domain"],
             selenium_node_id=slot["selenium_node_id"],
             slot_id=slot["slot_id"],
+        )
+
+    def _log_processing_exception(self, task: dict[str, Any], slot: dict[str, Any], exc: Exception) -> None:
+        log_event(
+            logger,
+            "exception",
+            "job_extraction_processing_exception",
+            domain="job_extraction",
+            registered_domain=task["registered_domain"],
+            selenium_node_id=slot.get("selenium_node_id"),
+            slot_id=slot.get("slot_id"),
+            worker_name=task.get("worker_name"),
+            celery_task_id=task.get("celery_task_id"),
+            error=str(exc),
+            exc_info=True,
         )

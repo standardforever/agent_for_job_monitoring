@@ -6,6 +6,8 @@ from typing import Any
 from core.config import Settings, get_settings
 from services.career_process_service import get_career_process_service
 from services.node_preflight_service import get_node_preflight_service
+from services.process_control_service import get_process_control_service
+from services.search_run_service import get_search_run_service
 from services.sync_mongodb_service import SyncMongoDBService, get_sync_mongodb_service
 from utils.logging import get_logger, log_event
 
@@ -23,12 +25,14 @@ class CareerCategoryNodeService:
     def start_process(self, process_id: str) -> dict[str, Any]:
         get_node_preflight_service().require_client_openai_config(process_id)
         process = self._load_ready_process(process_id)
+        mode = self._start_mode(process)
         tasks = self._build_tasks(process)
         summary = self._career_process.create_category_tasks(tasks)
-        self._career_process.start_process_run(process_id, summary)
+        self._career_process.start_process_run(process_id, summary, mode=mode)
         self._dispatch_tasks(process_id, summary["created_tasks"])
         return {
             "process_id": process_id,
+            "mode": mode,
             "created": summary["created"],
             "failed_without_candidates": summary["failed"],
             "blocked": summary["blocked"],
@@ -46,17 +50,28 @@ class CareerCategoryNodeService:
             raise RuntimeError("Career category node is already running for this process")
         return process
 
+    def _start_mode(self, process: dict[str, Any]) -> str:
+        status = str(process.get("career_status") or "not_started")
+        totals = process.get("career_totals") or {}
+        if status in {"completed", "partial_completed", "failed", "blocked"}:
+            return "rerun"
+        if any(int(totals.get(key) or 0) for key in ("completed", "failed", "blocked")):
+            return "rerun"
+        return "start"
+
     def _build_tasks(self, process: dict[str, Any]) -> list[dict[str, Any]]:
         return [self._task_from_ref(process, ref) for ref in self._completed_refs(process)]
 
     def _completed_refs(self, process: dict[str, Any]) -> list[dict[str, Any]]:
-        return list(process.get("domains", {}).get("completed", []) or [])
+        refs = list(process.get("domains", {}).get("completed", []) or [])
+        return get_process_control_service().filter_refs(process["process_id"], refs, "career_category")
 
     def _task_from_ref(self, process: dict[str, Any], ref: dict[str, Any]) -> dict[str, Any]:
         career_urls = self._career_url_candidates(ref)
         status = "queued" if career_urls else "failed"
         task = {
             "node": "career_page_category",
+            "process_id": process["process_id"],
             "registered_domain": ref["registered_domain"],
             "domain": ref.get("domain"),
             "input": {"career_urls": career_urls},
@@ -76,6 +91,9 @@ class CareerCategoryNodeService:
         return self._filter_ignored_candidates(ref["registered_domain"], self._dedupe_urls(values))
 
     def _shared_search_result(self, registered_domain: str) -> dict[str, Any]:
+        result = get_search_run_service().completed_result(registered_domain)
+        if result:
+            return result
         task = self._domain_tasks.find_one(
             {"registered_domain": registered_domain, "status": "completed"},
             {"result": 1},
@@ -116,6 +134,17 @@ class CareerCategoryNodeService:
     def _dispatch_task(self, process_id: str, task: dict[str, Any]) -> None:
         from infrastructure.tasks import run_career_category_node
 
+        if not self._career_process.mark_task_dispatched(task["registered_domain"]):
+            log_event(
+                logger,
+                "info",
+                "career_category_dispatch_skipped",
+                domain="career_category",
+                process_id=process_id,
+                registered_domain=task["registered_domain"],
+                reason="recently_dispatched",
+            )
+            return
         log_event(
             logger,
             "info",

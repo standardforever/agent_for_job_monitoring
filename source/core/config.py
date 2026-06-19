@@ -53,15 +53,54 @@ class Settings:
         "MONGODB_PROCESS_DOMAIN_TASKS_COLLECTION",
         "process_domain_tasks",
     )
+    mongodb_search_runs_collection: str = os.getenv("MONGODB_SEARCH_RUNS_COLLECTION", "search_runs")
+    mongodb_career_category_runs_collection: str = os.getenv(
+        "MONGODB_CAREER_CATEGORY_RUNS_COLLECTION",
+        "career_category_runs",
+    )
+    mongodb_job_pattern_runs_collection: str = os.getenv(
+        "MONGODB_JOB_PATTERN_RUNS_COLLECTION",
+        "job_pattern_runs",
+    )
+    mongodb_job_pagination_runs_collection: str = os.getenv(
+        "MONGODB_JOB_PAGINATION_RUNS_COLLECTION",
+        "job_pagination_runs",
+    )
+    mongodb_job_extraction_runs_collection: str = os.getenv(
+        "MONGODB_JOB_EXTRACTION_RUNS_COLLECTION",
+        "job_extraction_runs",
+    )
     mongodb_domain_jobs_collection: str = os.getenv("MONGODB_DOMAIN_JOBS_COLLECTION", "domain_jobs")
     mongodb_node_runs_collection: str = os.getenv("MONGODB_NODE_RUNS_COLLECTION", "node_runs")
+    mongodb_pipeline_runs_collection: str = os.getenv("MONGODB_PIPELINE_RUNS_COLLECTION", "pipeline_runs")
+    mongodb_client_job_reports_collection: str = os.getenv(
+        "MONGODB_CLIENT_JOB_REPORTS_COLLECTION",
+        "client_job_reports",
+    )
+    mongodb_client_job_alerts_collection: str = os.getenv(
+        "MONGODB_CLIENT_JOB_ALERTS_COLLECTION",
+        "client_job_alerts",
+    )
     mongodb_selenium_nodes_collection: str = os.getenv("MONGODB_SELENIUM_NODES_COLLECTION", "selenium_nodes")
     mongodb_selenium_session_slots_collection: str = os.getenv(
         "MONGODB_SELENIUM_SESSION_SLOTS_COLLECTION",
         "selenium_session_slots",
     )
 
+    process_email_enabled: bool = os.getenv("PROCESS_EMAIL_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
     process_email_subject_prefix: str = os.getenv("PROCESS_EMAIL_SUBJECT_PREFIX", "")
+    resend_api_key: str = os.getenv("RESEND_API_KEY", "")
+    email_from_address: str = os.getenv("EMAIL_FROM_ADDRESS", "")
+    email_from_name: str = os.getenv("EMAIL_FROM_NAME", "")
+    email_reply_to: str = os.getenv("EMAIL_REPLY_TO", "")
+    alert_auto_send: bool = os.getenv("ALERT_AUTO_SEND", "false").strip().lower() in {"1", "true", "yes"}
+    pipeline_daily_interval_hours: int = int(os.getenv("PIPELINE_DAILY_INTERVAL_HOURS", "24"))
+    pipeline_search_refresh_hours: int = int(os.getenv("PIPELINE_SEARCH_REFRESH_HOURS", "168"))
+    pipeline_category_refresh_hours: int = int(os.getenv("PIPELINE_CATEGORY_REFRESH_HOURS", "168"))
+    pipeline_node_wait_timeout_seconds: int = int(os.getenv("PIPELINE_NODE_WAIT_TIMEOUT_SECONDS", "21600"))
+    pipeline_poll_interval_seconds: int = int(os.getenv("PIPELINE_POLL_INTERVAL_SECONDS", "15"))
+    pipeline_stale_seconds: int = int(os.getenv("PIPELINE_STALE_SECONDS", "900"))
+    pipeline_failure_suppression_attempts: int = int(os.getenv("PIPELINE_FAILURE_SUPPRESSION_ATTEMPTS", "4"))
 
 
 def get_settings() -> Settings:

@@ -4,11 +4,13 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any
 
-from pymongo import ASCENDING, DESCENDING, ReturnDocument
+from pymongo import ASCENDING, ReturnDocument
 
 from core.config import Settings, get_settings
 from services.failure_classifier import classify_failure
-from services.node_lifecycle import retry_policy, terminal_status
+from services.node_lifecycle import terminal_status
+from services.process_control_service import get_process_control_service
+from services.search_run_service import get_search_run_service
 from services.sync_mongodb_service import SyncMongoDBService, get_sync_mongodb_service
 from utils.logging import get_logger, log_event
 
@@ -56,6 +58,25 @@ class ProcessRuntimeService:
         if capacity <= 0:
             return []
         return self._queued_refs(process)[:capacity]
+
+    def mark_domain_dispatched(self, process_id: str, registered_domain: str) -> bool:
+        threshold = _now() - timedelta(seconds=max(30, self._settings.watchdog_interval_seconds * 2))
+        result = self._processes.update_one(
+            {
+                "process_id": process_id,
+                "domains.queued": {
+                    "$elemMatch": {
+                        "registered_domain": registered_domain,
+                        "$or": [
+                            {"dispatched_at": {"$exists": False}},
+                            {"dispatched_at": {"$lt": threshold}},
+                        ],
+                    }
+                },
+            },
+            {"$set": {"domains.queued.$.dispatched_at": _now(), "updated_at": _now()}},
+        )
+        return bool(result.modified_count)
 
     def _load_process(self, process_id: str) -> dict[str, Any]:
         process = self._processes.find_one({"process_id": process_id})
@@ -121,7 +142,8 @@ class ProcessRuntimeService:
         return sum(1 for items in domains.values() for item in items if item.get("career_url"))
 
     def _queued_refs(self, process: dict[str, Any]) -> list[dict[str, Any]]:
-        return list(process.get("domains", {}).get("queued", []) or [])
+        refs = list(process.get("domains", {}).get("queued", []) or [])
+        return get_process_control_service().filter_refs(process["process_id"], refs, "search")
 
     def _search_start_mode(self, process: dict[str, Any]) -> str:
         totals = process.get("totals", {})
@@ -222,77 +244,18 @@ class ProcessRuntimeService:
         return queued[0] if queued else None
 
     def _claim_global_domain(self, ref: dict[str, Any], worker_name: str, task_id: str) -> dict[str, Any]:
-        completed = self._fresh_completed_domain(ref["registered_domain"])
-        if completed:
+        claim = get_search_run_service().claim_shared(ref, worker_name, task_id)
+        if claim["status"] == "fresh_completed":
             return {"status": "fresh_completed"}
-        if self._attempts_exhausted(ref["registered_domain"]) and not self._last_attempt_failed(ref["registered_domain"]):
-            return {"status": "max_attempts_exceeded"}
-        claimed = self._claim_runnable_domain(ref, worker_name, task_id)
-        if claimed:
+        if claim["status"] == "claimed":
             return {"status": "claimed"}
-        return {"status": "busy"}
-
-    def _attempts_exhausted(self, registered_domain: str) -> bool:
-        task = self._domain_tasks.find_one({"registered_domain": registered_domain}, {"attempts": 1})
-        attempts = int((task or {}).get("attempts") or 0)
-        return attempts >= retry_policy("search", self._settings.task_max_attempts).max_attempts
-
-    def _last_attempt_failed(self, registered_domain: str) -> bool:
-        task = self._domain_tasks.find_one({"registered_domain": registered_domain}, {"status": 1})
-        return (task or {}).get("status") == "failed"
+        return {"status": claim["status"]}
 
     def _has_supplied_career_url(self, ref: dict[str, Any]) -> bool:
         return bool(str(ref.get("career_url") or "").strip())
 
     def _fresh_completed_domain(self, registered_domain: str) -> dict[str, Any] | None:
-        threshold = _now() - timedelta(hours=24)
-        return self._domain_tasks.find_one(
-            {
-                "registered_domain": registered_domain,
-                "status": "completed",
-                "last_completed_at": {"$gte": threshold},
-            },
-        )
-
-    def _claim_runnable_domain(self, ref: dict[str, Any], worker_name: str, task_id: str) -> dict[str, Any] | None:
-        timestamp = _now()
-        stale_threshold = timestamp - timedelta(seconds=self._settings.stale_task_seconds)
-        max_attempts = retry_policy("search", self._settings.task_max_attempts).max_attempts
-        return self._domain_tasks.find_one_and_update(
-            {
-                "registered_domain": ref["registered_domain"],
-                "$or": [
-                    {"status": {"$in": ["queued", "failed"]}, "attempts": {"$lt": max_attempts}},
-                    {"status": "failed", "attempts": {"$gte": max_attempts}},
-                    {"status": "running", "last_started_at": {"$lt": stale_threshold}},
-                    {"status": "completed", "last_completed_at": {"$lt": timestamp - timedelta(hours=24)}},
-                ],
-            },
-            {
-                "$set": self._running_domain_fields(ref, worker_name, task_id, timestamp),
-                "$inc": {"attempts": 1},
-            },
-            return_document=ReturnDocument.AFTER,
-        )
-
-    def _running_domain_fields(
-        self,
-        ref: dict[str, Any],
-        worker_name: str,
-        task_id: str,
-        timestamp: datetime,
-    ) -> dict[str, Any]:
-        return {
-            "domain": ref["domain"],
-            "registered_domain": ref["registered_domain"],
-            "career_url": ref.get("career_url"),
-            "status": "running",
-            "worker_name": worker_name,
-            "celery_task_id": task_id,
-            "last_started_at": timestamp,
-            "updated_at": timestamp,
-            "last_error": None,
-        }
+        return get_search_run_service().fresh_completed(registered_domain)
 
     def _move_to_processing(
         self,
@@ -320,42 +283,62 @@ class ProcessRuntimeService:
         updated["celery_task_id"] = task_id
         updated["attempts"] = self._domain_attempts(ref["registered_domain"])
         updated["started_at"] = _now()
+        updated["heartbeat_at"] = _now()
+        updated["lease_expires_at"] = _now() + timedelta(seconds=self._settings.stale_task_seconds)
         return updated
 
+    def heartbeat_domain(self, process_id: str, registered_domain: str) -> None:
+        timestamp = _now()
+        expires_at = timestamp + timedelta(seconds=self._settings.stale_task_seconds)
+        self._processes.update_one(
+            {"process_id": process_id, "domains.processing.registered_domain": registered_domain},
+            {
+                "$set": {
+                    "domains.processing.$.heartbeat_at": timestamp,
+                    "domains.processing.$.lease_expires_at": expires_at,
+                    "updated_at": timestamp,
+                }
+            },
+        )
+        get_search_run_service().heartbeat(registered_domain)
+
     def _domain_attempts(self, registered_domain: str) -> int:
-        task = self._domain_tasks.find_one({"registered_domain": registered_domain}, {"attempts": 1})
-        return int((task or {}).get("attempts") or 0)
+        return get_search_run_service().attempts(registered_domain)
 
     def _release_global_domain(self, registered_domain: str, *, decrement_attempt: bool = False) -> None:
-        update: dict[str, Any] = {"$set": {"status": "queued", "updated_at": _now()}}
-        if decrement_attempt:
-            update["$inc"] = {"attempts": -1}
-        self._domain_tasks.update_one({"registered_domain": registered_domain, "status": "running"}, update)
+        get_search_run_service().requeue(registered_domain, decrement_attempt=decrement_attempt)
 
     def complete_with_reused_result(self, process_id: str, registered_domain: str) -> None:
         ref = self._get_queued_ref(process_id, registered_domain)
         if not ref:
             return
-        completed_ref = self._completed_ref(ref, reused=True)
+        completed = self._fresh_completed_domain(registered_domain) or {}
+        completed_ref = self._completed_ref(ref, reused=True, result=completed.get("result") or completed)
         self._move_queue_to_completed(process_id, ref, completed_ref)
 
     def complete_domain(self, process_id: str, domain_ref: dict[str, Any], result: dict[str, Any]) -> None:
-        completed_ref = self._completed_ref(domain_ref, reused=False)
+        completed_ref = self._completed_ref(domain_ref, reused=False, result=result)
         self._move_processing_to_completed(process_id, domain_ref, completed_ref)
+        get_search_run_service().mark_completed(domain_ref, result, process_id=process_id)
         if not domain_ref.get("uses_process_supplied_career_url"):
             self._mark_global_completed(domain_ref, result)
 
-    def _completed_ref(self, ref: dict[str, Any], reused: bool) -> dict[str, Any]:
+    def _completed_ref(self, ref: dict[str, Any], reused: bool, result: dict[str, Any] | None = None) -> dict[str, Any]:
         completed = self._clean_runtime_ref(ref)
         completed["reused"] = reused
         completed["completed_at"] = _now()
+        if result:
+            completed.update(self._search_summary_from_result(result, reused=reused))
         return completed
 
     def _clean_runtime_ref(self, ref: dict[str, Any]) -> dict[str, Any]:
         cleaned = dict(ref)
         cleaned.pop("worker_name", None)
         cleaned.pop("celery_task_id", None)
+        cleaned.pop("heartbeat_at", None)
+        cleaned.pop("lease_expires_at", None)
         cleaned.pop("uses_process_supplied_career_url", None)
+        cleaned.pop("dispatched_at", None)
         return cleaned
 
     def _move_queue_to_completed(
@@ -400,9 +383,13 @@ class ProcessRuntimeService:
                     "status": "completed",
                     "result": result,
                     "career_url": result.get("career_url"),
+                    "career_urls": result.get("career_urls", []),
+                    "source_type": result.get("source_type") or "search_engine",
+                    "cache_scope": result.get("cache_scope") or "shared_domain",
                     "last_completed_at": _now(),
                     "updated_at": _now(),
                     "last_error": None,
+                    "last_failure_type": None,
                 },
                 "$unset": {"worker_name": "", "celery_task_id": ""},
             },
@@ -417,6 +404,7 @@ class ProcessRuntimeService:
     ) -> None:
         failed_ref = self._failed_ref(domain_ref, error)
         self._move_processing_to_failed(process_id, domain_ref, failed_ref)
+        get_search_run_service().mark_failed(domain_ref, error, result, process_id=process_id)
         self._mark_global_failed(domain_ref, error, result)
 
     def fail_queued_domain(
@@ -431,6 +419,7 @@ class ProcessRuntimeService:
             return
         failed_ref = self._failed_ref(ref, error)
         self._move_queue_to_failed(process_id, ref, failed_ref)
+        get_search_run_service().mark_failed(ref, error, result, process_id=process_id)
         self._mark_global_failed(ref, error, result)
 
     def requeue_domain(
@@ -466,6 +455,7 @@ class ProcessRuntimeService:
     def _failed_ref(self, ref: dict[str, Any], error: str) -> dict[str, Any]:
         failed = self._clean_runtime_ref(ref)
         failed["error"] = error
+        failed["failure_type"] = classify_failure(error)
         failed["failed_at"] = _now()
         return failed
 
@@ -503,6 +493,12 @@ class ProcessRuntimeService:
         if result:
             fields["last_result"] = result
             fields["last_error_details"] = self._error_details_from_result(result)
+        else:
+            fields["last_error_details"] = {
+                "error": error,
+                "failure_type": classify_failure(error),
+                "failed_at": _now(),
+            }
         self._domain_tasks.update_one(
             {"registered_domain": ref["registered_domain"]},
             {
@@ -517,6 +513,7 @@ class ProcessRuntimeService:
             for key, value in {
                 "status": result.get("status"),
                 "error": result.get("error"),
+                "failure_type": classify_failure(str(result.get("error") or result.get("status") or "")),
                 "diagnostics": result.get("diagnostics"),
                 "career_urls": result.get("career_urls"),
                 "non_domain_career_urls": result.get("non_domain_career_urls"),
@@ -524,6 +521,20 @@ class ProcessRuntimeService:
                 "duration_seconds": result.get("duration_seconds"),
                 "selenium_node_id": result.get("selenium_node_id"),
                 "selenium_session_slot_id": result.get("selenium_session_slot_id"),
+            }.items()
+            if value not in (None, "", [])
+        }
+
+    def _search_summary_from_result(self, result: dict[str, Any], *, reused: bool) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in {
+                "career_url": result.get("career_url"),
+                "career_urls": result.get("career_urls"),
+                "search_status": result.get("status"),
+                "source_type": result.get("source_type") or ("reused_fresh_domain_result" if reused else "search_engine"),
+                "cache_scope": result.get("cache_scope"),
+                "reused_from_shared_domain": reused,
             }.items()
             if value not in (None, "", [])
         }
@@ -541,6 +552,9 @@ class ProcessRuntimeService:
         return [ref for ref in refs if self._is_stale_ref(ref, threshold)]
 
     def _is_stale_ref(self, ref: dict[str, Any], threshold: datetime) -> bool:
+        lease_expires_at = ref.get("lease_expires_at")
+        if isinstance(lease_expires_at, datetime):
+            return self._aware_datetime(lease_expires_at) < _now()
         started_at = ref.get("started_at")
         if not isinstance(started_at, datetime):
             return False

@@ -53,6 +53,7 @@ class JobPatternNodeProcessor:
         try:
             return asyncio.run(self._process_async(task, slot))
         except Exception as exc:
+            self._log_processing_exception(task, slot, exc)
             self._mark_slot_stale(slot, str(exc))
             raise
         finally:
@@ -89,7 +90,9 @@ class JobPatternNodeProcessor:
         with SeleniumSessionHeartbeat(slot["slot_id"]):
             try:
                 session = await self._create_selenium_session(slot)
+                self._heartbeat(slot)
                 browser_session = await self._attach_browser(session.cdp_url)
+                self._heartbeat(slot)
                 patterns = await self._generate_patterns(task, browser_session, slot)
                 return self._result(task, patterns, time.monotonic() - started)
             finally:
@@ -131,6 +134,9 @@ class JobPatternNodeProcessor:
             browser_session.page,
             url=page_url,
             example_jobs=candidate.get("example_jobs") or [],
+            seed_failed_pattern=self._seed_failed_pattern(candidate),
+            seed_extracted_jobs=candidate.get("jobs") or candidate.get("example_jobs") or [],
+            seed_validation=candidate.get("validation") or None,
         )
         self._heartbeat(slot)
         status = pattern_result.get("status")
@@ -150,6 +156,8 @@ class JobPatternNodeProcessor:
             "pattern_signature": pattern_signature(pattern),
             "page_fingerprint": pattern_result.get("page_fingerprint"),
             "generation_attempts": len(pattern_result.get("attempts") or []),
+            "regeneration_mode": candidate.get("regeneration_mode"),
+            "repair_seed_used": bool(self._seed_failed_pattern(candidate)),
             "last_error": None if status == "pattern_ready" else self._validation_error(validation),
         }
 
@@ -170,6 +178,16 @@ class JobPatternNodeProcessor:
         problems = [str(problem) for problem in validation.get("problems") or [] if str(problem).strip()]
         return " | ".join(problems) or "Pattern validation failed"
 
+    def _seed_failed_pattern(self, candidate: dict[str, Any]) -> dict[str, Any] | None:
+        pattern = candidate.get("pattern")
+        if not isinstance(pattern, dict):
+            return None
+        if candidate.get("regeneration_mode") == "force":
+            return None
+        if candidate.get("status") in {"pattern_ready", "pagination_completed", "extraction_completed"}:
+            return None
+        return pattern
+
     async def _close_selenium_session(self, slot: dict[str, Any], session: Any) -> None:
         if session is not None:
             await close_session_via_http_async(slot["grid_url"], session.session_id)
@@ -185,3 +203,18 @@ class JobPatternNodeProcessor:
 
     def _log_started(self, page_url: str) -> None:
         log_event(logger, "info", "job_pattern_generation_started", domain="job_pattern", page_url=page_url)
+
+    def _log_processing_exception(self, task: dict[str, Any], slot: dict[str, Any], exc: Exception) -> None:
+        log_event(
+            logger,
+            "exception",
+            "job_pattern_processing_exception",
+            domain="job_pattern",
+            registered_domain=task["registered_domain"],
+            selenium_node_id=slot.get("selenium_node_id"),
+            slot_id=slot.get("slot_id"),
+            worker_name=task.get("worker_name"),
+            celery_task_id=task.get("celery_task_id"),
+            error=str(exc),
+            exc_info=True,
+        )

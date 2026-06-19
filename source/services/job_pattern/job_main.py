@@ -298,5 +298,6 @@ async def main(
             domain=url or "job_pattern",
             page_url=url,
             error=str(exc),
+            exc_info=True,
         )
         raise

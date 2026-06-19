@@ -36,6 +36,8 @@ class JsonFormatter(logging.Formatter):
             "level":     record.levelname,
             "domain":    getattr(record, "domain", "unknown"),
         }
+        if record.exc_info:
+            log_record["exception"] = self.formatException(record.exc_info)
 
         for attr, value in record.__dict__.items():
             if attr not in exclude_attrs:
@@ -140,8 +142,9 @@ def log_event(
     message: str,
     *args: Any,
     domain: str | None = None,
+    exc_info: Any = False,
     **fields: Any,
 ) -> None:
     extra = {"domain": str(domain or "unknown")}
     extra.update(fields)
-    getattr(logger, level.lower())(message, *args, extra=extra)
+    getattr(logger, level.lower())(message, *args, extra=extra, exc_info=exc_info)

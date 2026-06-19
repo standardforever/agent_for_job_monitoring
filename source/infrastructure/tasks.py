@@ -16,11 +16,18 @@ from services.job_extraction_node_processor import (
     NoJobExtractionSessionSlotAvailable,
 )
 from services.job_extraction_node_service import get_job_extraction_node_service
+from services.job_pagination_node_processor import (
+    JobPaginationNodeProcessor,
+    NoJobPaginationSessionSlotAvailable,
+)
+from services.job_pagination_node_service import get_job_pagination_node_service
 from services.job_pattern_node_processor import JobPatternNodeProcessor, NoJobPatternSessionSlotAvailable
 from services.job_pattern_node_service import get_job_pattern_node_service
 from services.failure_classifier import classify_failure
 from services.node_lifecycle import retry_policy
 from services.node_run_history_service import get_node_run_history_service
+from services.node_task_heartbeat import NodeTaskHeartbeat
+from services.pipeline_orchestrator_service import get_pipeline_orchestrator_service
 from services.process_runtime_service import get_process_runtime_service
 from services.search_node_processor import NoSearchNodeSessionSlotAvailable, SearchNodeProcessor
 from utils.logging import get_logger, log_event
@@ -28,6 +35,22 @@ from utils.logging import get_logger, log_event
 
 settings = get_settings()
 logger = get_logger("celery_domain_tasks")
+
+
+@celery_app.task(bind=True, max_retries=0, name="infrastructure.tasks.run_pipeline_process")
+def run_pipeline_process(self: Task, pipeline_run_id: str) -> dict[str, Any]:
+    log_event(
+        logger,
+        "info",
+        "pipeline_task_received",
+        domain="worker",
+        pipeline_run_id=pipeline_run_id,
+        celery_task_id=str(self.request.id),
+    )
+    return get_pipeline_orchestrator_service().execute_pipeline_run(
+        pipeline_run_id,
+        celery_task_id=str(self.request.id),
+    )
 
 
 @celery_app.task(bind=True, max_retries=None, name="infrastructure.tasks.run_search_node")
@@ -87,6 +110,22 @@ def run_job_extraction_node(self: Task, process_id: str, registered_domain: str)
     return _handle_job_extraction_claim(self, process_id, registered_domain, claim)
 
 
+@celery_app.task(bind=True, max_retries=None, name="infrastructure.tasks.run_job_pagination_node")
+def run_job_pagination_node(self: Task, process_id: str, registered_domain: str) -> dict[str, Any]:
+    log_event(
+        logger,
+        "info",
+        "job_pagination_task_received",
+        domain="worker",
+        process_id=process_id,
+        registered_domain=registered_domain,
+        celery_task_id=str(self.request.id),
+    )
+    service = get_job_pagination_node_service()
+    claim = service.claim_task(registered_domain, _worker_name(self), str(self.request.id))
+    return _handle_job_pagination_claim(self, process_id, registered_domain, claim)
+
+
 @celery_app.task(bind=True, max_retries=None, name="infrastructure.tasks.run_job_pattern_node")
 def run_job_pattern_node(self: Task, process_id: str, registered_domain: str) -> dict[str, Any]:
     log_event(
@@ -117,7 +156,12 @@ def _handle_job_pattern_claim(
         return _run_job_pattern_processing(task, claim["task"])
     if status == "max_attempts_exceeded":
         service.mark_process_queued_task_failed(process_id, "Maximum attempts exceeded")
-        return {"status": "failed", "registered_domain": registered_domain, "error": "Maximum attempts exceeded"}
+        return {
+            "status": "failed",
+            "registered_domain": registered_domain,
+            "error": "Maximum attempts exceeded",
+            "failure_type": classify_failure("Maximum attempts exceeded"),
+        }
     return {"status": status, "registered_domain": registered_domain}
 
 
@@ -126,25 +170,89 @@ def _run_job_pattern_processing(task: Task, node_task: dict[str, Any]) -> dict[s
     process_id = str(node_task.get("dispatch_process_id") or "")
     run_id = _start_node_run("job_pattern", process_id, node_task)
     try:
-        result = JobPatternNodeProcessor().process(
-            node_task,
-            process_id=process_id,
-            worker_name=str(node_task["worker_name"]),
-            celery_task_id=str(node_task["celery_task_id"]),
-        )
+        with NodeTaskHeartbeat(lambda: service.heartbeat_task(node_task["registered_domain"])):
+            result = JobPatternNodeProcessor().process(
+                node_task,
+                process_id=process_id,
+                worker_name=str(node_task["worker_name"]),
+                celery_task_id=str(node_task["celery_task_id"]),
+            )
     except NoJobPatternSessionSlotAvailable as exc:
         service.requeue_task(node_task["registered_domain"], str(exc), decrement_attempt=True)
         service.mark_process_task_requeued(process_id, str(exc))
         _requeue_node_run(run_id, str(exc))
         raise task.retry(args=[process_id, node_task["registered_domain"]], countdown=_retry_countdown("job_pattern"))
     except Exception as exc:
-        service.fail_task(node_task["registered_domain"], str(exc), process_id=process_id)
-        _fail_node_run(run_id, str(exc))
-        _log_job_pattern_processing_failed(node_task, str(exc))
-        return {"status": "failed", "registered_domain": node_task["registered_domain"], "error": str(exc)}
+        error = str(exc)
+        service.fail_task(node_task["registered_domain"], error, process_id=process_id)
+        _fail_node_run(run_id, error)
+        _log_job_pattern_processing_failed(node_task, error)
+        return {
+            "status": "failed",
+            "registered_domain": node_task["registered_domain"],
+            "error": error,
+            "failure_type": classify_failure(error),
+        }
     service.complete_task(node_task["registered_domain"], result, process_id=process_id)
     _complete_node_run(run_id, result)
     _log_job_pattern_processing_completed(node_task, result)
+    return {"status": "completed", "registered_domain": node_task["registered_domain"]}
+
+
+def _handle_job_pagination_claim(
+    task: Task,
+    process_id: str,
+    registered_domain: str,
+    claim: dict[str, Any],
+) -> dict[str, Any]:
+    status = claim["status"]
+    service = get_job_pagination_node_service()
+    if status == "claimed":
+        claim["task"]["dispatch_process_id"] = process_id
+        service.mark_process_task_running(process_id)
+        return _run_job_pagination_processing(task, claim["task"])
+    if status == "max_attempts_exceeded":
+        service.mark_process_queued_task_failed(process_id, "Maximum attempts exceeded")
+        return {
+            "status": "failed",
+            "registered_domain": registered_domain,
+            "error": "Maximum attempts exceeded",
+            "failure_type": classify_failure("Maximum attempts exceeded"),
+        }
+    return {"status": status, "registered_domain": registered_domain}
+
+
+def _run_job_pagination_processing(task: Task, node_task: dict[str, Any]) -> dict[str, Any]:
+    service = get_job_pagination_node_service()
+    process_id = str(node_task.get("dispatch_process_id") or "")
+    run_id = _start_node_run("job_pagination", process_id, node_task)
+    try:
+        with NodeTaskHeartbeat(lambda: service.heartbeat_task(node_task["registered_domain"])):
+            result = JobPaginationNodeProcessor().process(
+                node_task,
+                process_id=process_id,
+                worker_name=str(node_task["worker_name"]),
+                celery_task_id=str(node_task["celery_task_id"]),
+            )
+    except NoJobPaginationSessionSlotAvailable as exc:
+        service.requeue_task(node_task["registered_domain"], str(exc), decrement_attempt=True)
+        service.mark_process_task_requeued(process_id, str(exc))
+        _requeue_node_run(run_id, str(exc))
+        raise task.retry(args=[process_id, node_task["registered_domain"]], countdown=_retry_countdown("job_pagination"))
+    except Exception as exc:
+        error = str(exc)
+        service.fail_task(node_task["registered_domain"], error, process_id=process_id)
+        _fail_node_run(run_id, error)
+        _log_job_pagination_processing_failed(node_task, error)
+        return {
+            "status": "failed",
+            "registered_domain": node_task["registered_domain"],
+            "error": error,
+            "failure_type": classify_failure(error),
+        }
+    service.complete_task(node_task["registered_domain"], result, process_id=process_id)
+    _complete_node_run(run_id, result)
+    _log_job_pagination_processing_completed(node_task, result)
     return {"status": "completed", "registered_domain": node_task["registered_domain"]}
 
 
@@ -162,7 +270,12 @@ def _handle_job_extraction_claim(
         return _run_job_extraction_processing(task, claim["task"])
     if status == "max_attempts_exceeded":
         service.mark_process_queued_task_failed(process_id, "Maximum attempts exceeded")
-        return {"status": "failed", "registered_domain": registered_domain, "error": "Maximum attempts exceeded"}
+        return {
+            "status": "failed",
+            "registered_domain": registered_domain,
+            "error": "Maximum attempts exceeded",
+            "failure_type": classify_failure("Maximum attempts exceeded"),
+        }
     return {"status": status, "registered_domain": registered_domain}
 
 
@@ -171,22 +284,29 @@ def _run_job_extraction_processing(task: Task, node_task: dict[str, Any]) -> dic
     process_id = str(node_task.get("dispatch_process_id") or "")
     run_id = _start_node_run("job_extraction", process_id, node_task)
     try:
-        result = JobExtractionNodeProcessor().process(
-            node_task,
-            process_id=process_id,
-            worker_name=str(node_task["worker_name"]),
-            celery_task_id=str(node_task["celery_task_id"]),
-        )
+        with NodeTaskHeartbeat(lambda: service.heartbeat_task(node_task["registered_domain"])):
+            result = JobExtractionNodeProcessor().process(
+                node_task,
+                process_id=process_id,
+                worker_name=str(node_task["worker_name"]),
+                celery_task_id=str(node_task["celery_task_id"]),
+            )
     except NoJobExtractionSessionSlotAvailable as exc:
         service.requeue_task(node_task["registered_domain"], str(exc), decrement_attempt=True)
         service.mark_process_task_requeued(process_id, str(exc))
         _requeue_node_run(run_id, str(exc))
         raise task.retry(args=[process_id, node_task["registered_domain"]], countdown=_retry_countdown("job_extraction"))
     except Exception as exc:
-        service.fail_task(node_task["registered_domain"], str(exc), process_id=process_id)
-        _fail_node_run(run_id, str(exc))
-        _log_job_extraction_processing_failed(node_task, str(exc))
-        return {"status": "failed", "registered_domain": node_task["registered_domain"], "error": str(exc)}
+        error = str(exc)
+        service.fail_task(node_task["registered_domain"], error, process_id=process_id)
+        _fail_node_run(run_id, error)
+        _log_job_extraction_processing_failed(node_task, error)
+        return {
+            "status": "failed",
+            "registered_domain": node_task["registered_domain"],
+            "error": error,
+            "failure_type": classify_failure(error),
+        }
     service.complete_task(node_task["registered_domain"], result, process_id=process_id)
     _complete_node_run(run_id, result)
     _log_job_extraction_processing_completed(node_task, result)
@@ -220,12 +340,13 @@ def _run_category_processing(task: Task, node_task: dict[str, Any]) -> dict[str,
     process_id = str(node_task.get("dispatch_process_id") or "")
     run_id = _start_node_run("career_category", process_id, node_task)
     try:
-        result = CareerCategoryNodeProcessor().process(
-            node_task,
-            process_id=node_task.get("dispatch_process_id"),
-            worker_name=str(node_task["worker_name"]),
-            celery_task_id=str(node_task["celery_task_id"]),
-        )
+        with NodeTaskHeartbeat(lambda: service.heartbeat_task(node_task["registered_domain"])):
+            result = CareerCategoryNodeProcessor().process(
+                node_task,
+                process_id=node_task.get("dispatch_process_id"),
+                worker_name=str(node_task["worker_name"]),
+                celery_task_id=str(node_task["celery_task_id"]),
+            )
     except NoCareerCategorySessionSlotAvailable as exc:
         service.requeue_task(
             node_task["registered_domain"],
@@ -278,27 +399,41 @@ def _run_search_processing(task: Task, process_id: str, domain_ref: dict[str, An
     run_id = _start_node_run("search", process_id, domain_ref)
     try:
         _log_domain_processing_started(process_id, domain_ref)
-        result = SearchNodeProcessor().process(
-            process_id,
-            domain_ref,
-            worker_name=str(domain_ref["worker_name"]),
-            task_id=str(domain_ref["celery_task_id"]),
-        )
+        with NodeTaskHeartbeat(lambda: runtime.heartbeat_domain(process_id, domain_ref["registered_domain"])):
+            result = SearchNodeProcessor().process(
+                process_id,
+                domain_ref,
+                worker_name=str(domain_ref["worker_name"]),
+                task_id=str(domain_ref["celery_task_id"]),
+            )
     except NoSearchNodeSessionSlotAvailable as exc:
         runtime.requeue_domain(process_id, domain_ref, str(exc), decrement_attempt=True)
         _requeue_node_run(run_id, str(exc))
         raise task.retry(args=[process_id, domain_ref["registered_domain"]], countdown=_retry_countdown("search"))
     except Exception as exc:
-        runtime.fail_domain(process_id, domain_ref, str(exc))
-        _fail_node_run(run_id, str(exc))
-        _log_domain_processing_failed(process_id, domain_ref, str(exc))
-        return {"status": "failed", "registered_domain": domain_ref["registered_domain"], "error": str(exc)}
+        error = str(exc)
+        runtime.fail_domain(process_id, domain_ref, error)
+        _fail_node_run(run_id, error)
+        _log_search_processing_exception(process_id, domain_ref, error)
+        _log_domain_processing_failed(process_id, domain_ref, error)
+        return {
+            "status": "failed",
+            "registered_domain": domain_ref["registered_domain"],
+            "error": error,
+            "failure_type": classify_failure(error),
+        }
     if not result.get("success"):
         error = str(result.get("error") or result.get("status") or "Search node failed")
         runtime.fail_domain(process_id, domain_ref, error, result)
         _fail_node_run(run_id, error, result)
         _log_domain_processing_failed(process_id, domain_ref, error)
-        return {"status": "failed", "registered_domain": domain_ref["registered_domain"], "error": error, "result": result}
+        return {
+            "status": "failed",
+            "registered_domain": domain_ref["registered_domain"],
+            "error": error,
+            "failure_type": classify_failure(error),
+            "result": result,
+        }
     runtime.complete_domain(process_id, domain_ref, result)
     _complete_node_run(run_id, result)
     _log_domain_processing_completed(process_id, domain_ref)
@@ -401,6 +536,7 @@ def _node_attempt(node: str, node_task: dict[str, Any]) -> int | None:
         "search": "attempts",
         "career_category": "career_process_attempts",
         "job_pattern": "job_pattern_attempts",
+        "job_pagination": "job_pagination_attempts",
         "job_extraction": "job_extraction_attempts",
     }.get(node)
     if not key:
@@ -445,6 +581,22 @@ def _log_domain_processing_failed(process_id: str, domain_ref: dict[str, Any], e
         process_id=process_id,
         registered_domain=domain_ref["registered_domain"],
         error=error,
+        failure_type=classify_failure(error),
+    )
+
+
+def _log_search_processing_exception(process_id: str, domain_ref: dict[str, Any], error: str) -> None:
+    log_event(
+        logger,
+        "exception",
+        "domain_processing_exception",
+        domain="worker",
+        process_id=process_id,
+        registered_domain=domain_ref["registered_domain"],
+        celery_task_id=domain_ref.get("celery_task_id"),
+        error=error,
+        failure_type=classify_failure(error),
+        exc_info=True,
     )
 
 
@@ -502,6 +654,30 @@ def _log_job_pattern_processing_failed(node_task: dict[str, Any], error: str) ->
         logger,
         "warning",
         "job_pattern_processing_failed",
+        domain="worker",
+        process_id=node_task.get("dispatch_process_id"),
+        registered_domain=node_task["registered_domain"],
+        error=error,
+    )
+
+
+def _log_job_pagination_processing_completed(node_task: dict[str, Any], result: dict[str, Any]) -> None:
+    log_event(
+        logger,
+        "info",
+        "job_pagination_processing_completed",
+        domain="worker",
+        process_id=node_task.get("dispatch_process_id"),
+        registered_domain=node_task["registered_domain"],
+        stored_jobs=(result.get("job_storage") or {}).get("seen"),
+    )
+
+
+def _log_job_pagination_processing_failed(node_task: dict[str, Any], error: str) -> None:
+    log_event(
+        logger,
+        "warning",
+        "job_pagination_processing_failed",
         domain="worker",
         process_id=node_task.get("dispatch_process_id"),
         registered_domain=node_task["registered_domain"],

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
-from typing import Any, List
+from typing import Any, Callable, List
 
 from prompts.career_category_prompt import create_job_page_analysis_prompt
 from services.flow_safety import is_email_navigation_url, normalize_navigation_url, _is_external_domain, has_skip_extension, detect_blocked_platform
@@ -255,16 +255,37 @@ _NON_ACCESSIBLE_PAGE_STATUSES = {
 }
 
 
+def _send_heartbeat(heartbeat: Callable[[], None] | None) -> None:
+    if heartbeat is None:
+        return
+    try:
+        heartbeat()
+    except Exception:
+        log_event(
+            logger,
+            "warning",
+            "career_category_heartbeat_failed",
+            domain="career_category",
+            exc_info=True,
+        )
 
 
-async def career_page_category_node(career_page_url: List[str], browser_session: Any, agent_index: int, agent_tab: dict) -> dict:
+async def career_page_category_node(
+    career_page_url: List[str],
+    browser_session: Any,
+    agent_index: int,
+    agent_tab: dict,
+    heartbeat: Callable[[], None] | None = None,
+) -> dict:
     career_pages_analysis = []
     visited_urls: list[str] = []
+    _send_heartbeat(heartbeat)
 
     for career_url in career_page_url:
         if career_url in visited_urls:
             continue
         visited_urls.append(career_url)
+        _send_heartbeat(heartbeat)
 
         nav_response = await navigate_to_url(
             browser_session.page if browser_session is not None else None,
@@ -274,6 +295,7 @@ async def career_page_category_node(career_page_url: List[str], browser_session:
             post_navigation_delay_ms=0,
         )
         navigation_result = {**nav_response}
+        _send_heartbeat(heartbeat)
 
         log_event(
             logger,
@@ -295,6 +317,7 @@ async def career_page_category_node(career_page_url: List[str], browser_session:
             continue
 
         await asyncio.sleep(5000 / 1000)
+        _send_heartbeat(heartbeat)
 
         existing_job_urls: list[str] = []
         navigation_steps = 0
@@ -307,6 +330,7 @@ async def career_page_category_node(career_page_url: List[str], browser_session:
                 browser_session.page if browser_session is not None else None,
                 sections=["body"],
             )
+            _send_heartbeat(heartbeat)
 
             if extracted_content_response is None or not extracted_content_response.get("markdown"):
                 log_event(
@@ -354,6 +378,7 @@ async def career_page_category_node(career_page_url: List[str], browser_session:
             )
             service = OpenAIAnalysisService()
             analysis = await service.analyze_data(prompt=prompt, json_response=True)
+            _send_heartbeat(heartbeat)
 
             if not analysis.success:
                 navigation_result["status"] = "ai_analysis_failed"
@@ -455,6 +480,7 @@ async def career_page_category_node(career_page_url: List[str], browser_session:
                         None,
                         3000,
                     )
+                    _send_heartbeat(heartbeat)
 
                     if follow_status not in {"navigated", "clicked"}:
                         navigation_result["status"] = follow_status
@@ -547,6 +573,7 @@ async def career_page_category_node(career_page_url: List[str], browser_session:
                         None,
                         3000,
                     )
+                    _send_heartbeat(heartbeat)
 
                     step_record["status"] = f"external_domain_redirect — {follow_status}"
                     step_record["landed_url"] = landed_url
@@ -574,6 +601,7 @@ async def career_page_category_node(career_page_url: List[str], browser_session:
                         None,
                         3000,
                     )
+                    _send_heartbeat(heartbeat)
 
                     step_record["status"] = follow_status
                     step_record["landed_url"] = landed_url
@@ -607,6 +635,7 @@ async def career_page_category_node(career_page_url: List[str], browser_session:
                         target_button,
                         3000,
                     )
+                    _send_heartbeat(heartbeat)
 
                     step_record["status"] = follow_status
                     step_record["landed_url"] = landed_url

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
 
 from api.dependencies import validate_admin_password
 from services.file_input_service import FileInputService
@@ -65,6 +65,60 @@ async def get_process(
         return await get_process_upload_service().get_process(process_id)
     except ValueError as exc:
         log_event(logger, "warning", "process_not_found", domain="api", process_id=process_id)
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/processes/{process_id}/domains/{registered_domain}/stop")
+async def stop_process_domain(
+    process_id: str,
+    registered_domain: str,
+    payload: dict[str, Any] = Body(default={}),
+    _: None = Depends(validate_admin_password),
+) -> dict[str, Any]:
+    reason = str(payload.get("reason") or "").strip() or None
+    try:
+        return await get_process_upload_service().stop_domain(process_id, registered_domain, reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/processes/{process_id}/domains/{registered_domain}/resume")
+async def resume_process_domain(
+    process_id: str,
+    registered_domain: str,
+    _: None = Depends(validate_admin_password),
+) -> dict[str, Any]:
+    try:
+        return await get_process_upload_service().resume_domain(process_id, registered_domain)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/processes/{process_id}/domains/{registered_domain}/nodes/{node}/stop")
+async def stop_process_domain_node(
+    process_id: str,
+    registered_domain: str,
+    node: str,
+    payload: dict[str, Any] = Body(default={}),
+    _: None = Depends(validate_admin_password),
+) -> dict[str, Any]:
+    reason = str(payload.get("reason") or "").strip() or None
+    try:
+        return await get_process_upload_service().stop_domain_node(process_id, registered_domain, node, reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/processes/{process_id}/domains/{registered_domain}/nodes/{node}/resume")
+async def resume_process_domain_node(
+    process_id: str,
+    registered_domain: str,
+    node: str,
+    _: None = Depends(validate_admin_password),
+) -> dict[str, Any]:
+    try:
+        return await get_process_upload_service().resume_domain_node(process_id, registered_domain, node)
+    except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 

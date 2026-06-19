@@ -5,6 +5,7 @@ from functools import lru_cache
 from typing import Any
 
 from pymongo import ASCENDING, ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 from core.config import Settings, get_settings
 from services.domain_job_service import get_domain_job_service
@@ -27,12 +28,17 @@ class CareerProcessService:
         self._settings = settings
         self._processes = mongodb.collection(settings.mongodb_process_uploads_collection)
         self._domain_tasks = mongodb.collection(settings.mongodb_process_domain_tasks_collection)
+        self._category_runs = mongodb.collection(settings.mongodb_career_category_runs_collection)
         self._indexes_ready = False
 
     def ensure_indexes(self) -> None:
         if self._indexes_ready:
             return
         self._domain_tasks.create_index([("career_process_status", ASCENDING), ("career_process_updated_at", ASCENDING)])
+        self._category_runs.create_index([("category_run_key", ASCENDING)], unique=True)
+        self._category_runs.create_index([("registered_domain", ASCENDING), ("status", ASCENDING)])
+        self._category_runs.create_index([("status", ASCENDING), ("updated_at", ASCENDING)])
+        self._category_runs.create_index([("last_started_at", ASCENDING)])
         get_domain_job_service().ensure_indexes()
         self._indexes_ready = True
 
@@ -52,7 +58,7 @@ class CareerProcessService:
             blocked += 1
         return {"created": len(created_tasks), "failed": failed, "blocked": blocked, "created_tasks": created_tasks}
 
-    def start_process_run(self, process_id: str, summary: dict[str, Any]) -> None:
+    def start_process_run(self, process_id: str, summary: dict[str, Any], *, mode: str = "start") -> None:
         queued = int(summary.get("created") or 0)
         failed = int(summary.get("failed") or 0)
         blocked = int(summary.get("blocked") or 0)
@@ -62,6 +68,7 @@ class CareerProcessService:
             {
                 "$set": {
                     "career_status": status,
+                    "career_mode": mode,
                     "career_totals": {
                         "domains": queued + failed + blocked,
                         "queued": queued,
@@ -87,79 +94,143 @@ class CareerProcessService:
             },
         )
 
-    def _queue_task(self, task: dict[str, Any]) -> bool:
+    def mark_task_dispatched(self, registered_domain: str) -> bool:
+        threshold = _now() - timedelta(seconds=max(30, self._settings.watchdog_interval_seconds * 2))
         timestamp = _now()
-        result = self._domain_tasks.update_one(
+        result = self._category_runs.update_one(
             {
-                "registered_domain": task["registered_domain"],
+                "category_run_key": self._category_run_key(registered_domain),
+                "status": "queued",
                 "$or": [
-                    {"career_process_status": {"$exists": False}},
-                    {"career_process_status": {"$in": ["failed", "completed"]}},
+                    {"dispatched_at": {"$exists": False}},
+                    {"dispatched_at": {"$lt": threshold}},
                 ],
             },
-            {
-                "$set": {
-                    "career_process_status": "queued",
-                    "career_process_input": task["input"],
-                    "career_process_attempts": 0,
-                    "career_process_last_started_at": None,
-                    "career_process_updated_at": timestamp,
-                    "updated_at": timestamp,
-                },
-                "$unset": {
-                    "career_process": "",
-                    "career_process_last_completed_at": "",
-                    "career_process_last_error": "",
-                },
-            },
+            {"$set": {"dispatched_at": timestamp, "updated_at": timestamp}},
         )
+        if result.modified_count:
+            self._mirror_category_dispatch(registered_domain, timestamp)
         return bool(result.modified_count)
+
+    def _queue_task(self, task: dict[str, Any]) -> bool:
+        timestamp = _now()
+        key = self._category_run_key(task["registered_domain"])
+        try:
+            result = self._category_runs.update_one(
+                {
+                    "category_run_key": key,
+                    "$or": [
+                        {"status": {"$exists": False}},
+                        {"status": {"$in": ["failed", "completed", "blocked"]}},
+                    ],
+                },
+                {
+                    "$set": {
+                        "category_run_key": key,
+                        "node": "career_category",
+                        "registered_domain": task["registered_domain"],
+                        "domain": task.get("domain"),
+                        "last_process_id": task.get("process_id"),
+                        "input": task["input"],
+                        "status": "queued",
+                        "attempts": 0,
+                        "last_started_at": None,
+                        "queued_at": timestamp,
+                        "updated_at": timestamp,
+                    },
+                    "$setOnInsert": {"created_at": timestamp, "first_started_at": None, "run_count": 0},
+                    "$unset": {
+                        "result": "",
+                        "last_completed_at": "",
+                        "last_error": "",
+                        "last_error_details": "",
+                        "dispatched_at": "",
+                        "worker_name": "",
+                        "celery_task_id": "",
+                        "heartbeat_at": "",
+                        "lease_expires_at": "",
+                    },
+                },
+                upsert=True,
+            )
+        except DuplicateKeyError:
+            return False
+        created = bool(result.modified_count or result.upserted_id)
+        if created:
+            self._mirror_category_queued(task, timestamp)
+        return created
 
     def _mark_missing_candidates(self, task: dict[str, Any]) -> None:
         timestamp = _now()
-        self._domain_tasks.update_one(
-            {"registered_domain": task["registered_domain"]},
+        failure_type = classify_failure(task["last_error"])
+        self._category_runs.update_one(
+            {"category_run_key": self._category_run_key(task["registered_domain"])},
             {
                 "$set": {
-                    "career_process_status": "failed",
-                    "career_process_input": task["input"],
-                    "career_process_last_error": task["last_error"],
-                    "career_process_last_failure_type": classify_failure(task["last_error"]),
-                    "career_process_updated_at": timestamp,
+                    "category_run_key": self._category_run_key(task["registered_domain"]),
+                    "node": "career_category",
+                    "registered_domain": task["registered_domain"],
+                    "domain": task.get("domain"),
+                    "last_process_id": task.get("process_id"),
+                    "input": task["input"],
+                    "status": "failed",
+                    "last_error": task["last_error"],
+                    "last_failure_type": failure_type,
+                    "last_error_details": {
+                        "error": task["last_error"],
+                        "failure_type": failure_type,
+                        "failed_at": timestamp,
+                    },
                     "updated_at": timestamp,
                 },
+                "$setOnInsert": {"created_at": timestamp, "attempts": 0, "run_count": 0},
             },
+            upsert=True,
         )
+        self._mirror_category_failed(task["registered_domain"], task["last_error"], timestamp)
 
     def claim_category_task(self, registered_domain: str, worker_name: str, task_id: str) -> dict[str, Any]:
         self.ensure_indexes()
         timestamp = _now()
         stale_threshold = timestamp - timedelta(seconds=self._settings.stale_task_seconds)
-        task = self._domain_tasks.find_one_and_update(
+        task = self._category_runs.find_one_and_update(
             {
-                "registered_domain": registered_domain,
+                "category_run_key": self._category_run_key(registered_domain),
                 "$or": [
-                    {"career_process_status": "queued"},
-                    {"career_process_status": "running", "career_process_last_started_at": {"$lt": stale_threshold}},
+                    {"status": "queued"},
+                    {"status": "running", "lease_expires_at": {"$lt": timestamp}},
+                    {
+                        "status": "running",
+                        "lease_expires_at": {"$exists": False},
+                        "last_started_at": {"$lt": stale_threshold},
+                    },
                 ],
             },
             {
                 "$set": {
-                    "career_process_status": "running",
-                    "career_process_worker_name": worker_name,
-                    "career_process_celery_task_id": task_id,
-                    "career_process_last_started_at": timestamp,
-                    "career_process_updated_at": timestamp,
+                    "status": "running",
+                    "worker_name": worker_name,
+                    "celery_task_id": task_id,
+                    "last_started_at": timestamp,
+                    "heartbeat_at": timestamp,
+                    "lease_expires_at": timestamp + timedelta(seconds=self._settings.stale_task_seconds),
                     "updated_at": timestamp,
                 },
-                "$inc": {"career_process_attempts": 1},
-                "$unset": {"career_process_last_error": ""},
+                "$inc": {"attempts": 1, "run_count": 1},
+                "$unset": {"last_error": "", "dispatched_at": ""},
             },
             return_document=ReturnDocument.AFTER,
         )
         if not task:
             return {"status": "not_available"}
-        if int(task.get("career_process_attempts") or 0) > retry_policy("career_category", self._settings.task_max_attempts).max_attempts:
+        if not task.get("first_started_at"):
+            self._category_runs.update_one(
+                {"category_run_key": self._category_run_key(registered_domain)},
+                {"$set": {"first_started_at": timestamp}},
+            )
+            task["first_started_at"] = timestamp
+        self._mirror_category_running(task, timestamp)
+        if int(task.get("attempts") or 0) > retry_policy("career_category", self._settings.task_max_attempts).max_attempts:
             self.fail_task(registered_domain, "Maximum attempts exceeded")
             return {"status": "max_attempts_exceeded"}
         return {"status": "claimed", "task": self._task_from_domain(task)}
@@ -168,36 +239,62 @@ class CareerProcessService:
         return {
             "registered_domain": domain_task["registered_domain"],
             "domain": domain_task.get("domain"),
-            "input": domain_task.get("career_process_input") or {},
-            "worker_name": domain_task.get("career_process_worker_name"),
-            "celery_task_id": domain_task.get("career_process_celery_task_id"),
-            "career_process_attempts": domain_task.get("career_process_attempts"),
+            "input": domain_task.get("input") or domain_task.get("career_process_input") or {},
+            "worker_name": domain_task.get("worker_name") or domain_task.get("career_process_worker_name"),
+            "celery_task_id": domain_task.get("celery_task_id") or domain_task.get("career_process_celery_task_id"),
+            "career_process_attempts": domain_task.get("attempts") or domain_task.get("career_process_attempts"),
+            "category_run_key": domain_task.get("category_run_key"),
         }
+
+    def heartbeat_task(self, registered_domain: str) -> None:
+        timestamp = _now()
+        expires_at = timestamp + timedelta(seconds=self._settings.stale_task_seconds)
+        self._category_runs.update_one(
+            {"category_run_key": self._category_run_key(registered_domain), "status": "running"},
+            {"$set": {"heartbeat_at": timestamp, "lease_expires_at": expires_at, "updated_at": timestamp}},
+        )
+        self._domain_tasks.update_one(
+            {"registered_domain": registered_domain, "career_process_status": "running"},
+            {
+                "$set": {
+                    "career_process_heartbeat_at": timestamp,
+                    "career_process_lease_expires_at": expires_at,
+                    "career_process_updated_at": timestamp,
+                    "updated_at": timestamp,
+                }
+            },
+        )
 
     def complete_task(self, registered_domain: str, result: dict[str, Any], process_id: str | None = None) -> None:
         timestamp = _now()
-        clean_result = self._clean_category_result(result, timestamp)
+        previous_state = self._previous_category_state(registered_domain)
+        clean_result = self._clean_category_result(result, timestamp, previous_state=previous_state)
         job_summary = self._upsert_jobs(registered_domain, result, timestamp)
         clean_result["job_storage"] = job_summary
         ignored_candidates = self._ignored_candidates(clean_result)
-        self._domain_tasks.update_one(
+        self._category_runs.update_one(
             self._task_filter(registered_domain, "running"),
             {
                 "$set": {
-                    "career_process_status": "completed",
-                    "career_process": clean_result,
-                    "career_process_last_completed_at": timestamp,
-                    "career_process_updated_at": timestamp,
+                    "status": "completed",
+                    "result": clean_result,
+                    "last_outcome": clean_result.get("outcome"),
+                    "last_failure_type": None,
+                    "last_completed_at": timestamp,
                     "career_candidate_ignore_urls": ignored_candidates,
                     "updated_at": timestamp,
                 },
                 "$unset": {
-                    "career_process_worker_name": "",
-                    "career_process_celery_task_id": "",
-                    "career_process_last_error": "",
+                    "worker_name": "",
+                    "celery_task_id": "",
+                    "heartbeat_at": "",
+                    "lease_expires_at": "",
+                    "last_error": "",
+                    "last_error_details": "",
                 },
             },
         )
+        self._mirror_category_completed(registered_domain, clean_result, ignored_candidates, timestamp)
         if process_id:
             self.mark_process_task_completed(process_id)
 
@@ -270,13 +367,228 @@ class CareerProcessService:
 
     def fail_task(self, registered_domain: str, error: str, process_id: str | None = None) -> None:
         timestamp = _now()
+        failure_type = classify_failure(error)
+        error_details = {
+            "error": error,
+            "failure_type": failure_type,
+            "failed_at": timestamp,
+        }
+        self._category_runs.update_one(
+            {"category_run_key": self._category_run_key(registered_domain)},
+            {
+                "$set": {
+                    "category_run_key": self._category_run_key(registered_domain),
+                    "node": "career_category",
+                    "registered_domain": registered_domain,
+                    "status": "failed",
+                    "last_error": error,
+                    "last_failure_type": failure_type,
+                    "last_error_details": error_details,
+                    "updated_at": timestamp,
+                },
+                "$setOnInsert": {"created_at": timestamp, "attempts": 0, "run_count": 0},
+                "$unset": {
+                    "worker_name": "",
+                    "celery_task_id": "",
+                },
+            },
+            upsert=True,
+        )
+        self._mirror_category_failed(registered_domain, error, timestamp, error_details=error_details)
+        if process_id:
+            self.mark_process_task_failed(process_id, error)
+
+    def requeue_task(self, registered_domain: str, error: str, *, decrement_attempt: bool = False) -> None:
+        timestamp = _now()
+        update: dict[str, Any] = {
+            "$set": {
+                "status": "queued",
+                "last_error": error,
+                "last_failure_type": classify_failure(error),
+                "updated_at": timestamp,
+            },
+            "$unset": {
+                "worker_name": "",
+                "celery_task_id": "",
+                "heartbeat_at": "",
+                "lease_expires_at": "",
+            },
+        }
+        if decrement_attempt:
+            update["$inc"] = {"attempts": -1}
+        self._category_runs.update_one(self._task_filter(registered_domain, "running"), update)
+        self._mirror_category_requeued(registered_domain, error, timestamp, decrement_attempt=decrement_attempt)
+
+    def active_process_run(self, process: dict[str, Any]) -> bool:
+        return process.get("career_status") in {"queued", "running"}
+
+    def requeue_stale_category_tasks(self) -> int:
+        self.ensure_indexes()
+        threshold = _now() - timedelta(seconds=self._settings.stale_task_seconds)
+        timestamp = _now()
+        stale_runs = list(
+            self._category_runs.find(
+                {
+                    "status": "running",
+                    "$or": [
+                        {"lease_expires_at": {"$lt": timestamp}},
+                        {"lease_expires_at": {"$exists": False}, "last_started_at": {"$lt": threshold}},
+                    ],
+                },
+                {"registered_domain": 1},
+            )
+        )
+        result = self._category_runs.update_many(
+            {
+                "status": "running",
+                "$or": [
+                    {"lease_expires_at": {"$lt": timestamp}},
+                    {"lease_expires_at": {"$exists": False}, "last_started_at": {"$lt": threshold}},
+                ],
+            },
+            {
+                "$set": {
+                    "status": "queued",
+                    "last_error": "Requeued stale category task",
+                    "updated_at": timestamp,
+                },
+                "$unset": {
+                    "worker_name": "",
+                    "celery_task_id": "",
+                    "heartbeat_at": "",
+                    "lease_expires_at": "",
+                },
+            },
+        )
+        if result.modified_count:
+            for run in stale_runs:
+                self._mirror_category_requeued(str(run.get("registered_domain") or ""), "Requeued stale category task", timestamp)
+            log_event(logger, "warning", "stale_category_tasks_requeued", domain="watchdog", count=result.modified_count)
+        return int(result.modified_count)
+
+    def queued_category_tasks_for_watchdog(self) -> list[dict[str, Any]]:
+        self.ensure_indexes()
+        return list(self._category_runs.find({"status": "queued"}))
+
+    def _task_filter(self, registered_domain: str, status: str) -> dict[str, Any]:
+        return {"category_run_key": self._category_run_key(registered_domain), "status": status}
+
+    def _category_run_key(self, registered_domain: str) -> str:
+        return f"shared:{registered_domain}"
+
+    def _mirror_category_queued(self, task: dict[str, Any], timestamp: datetime) -> None:
+        self._domain_tasks.update_one(
+            {"registered_domain": task["registered_domain"]},
+            {
+                "$set": {
+                    "registered_domain": task["registered_domain"],
+                    "domain": task.get("domain"),
+                    "career_process_status": "queued",
+                    "career_process_input": task["input"],
+                    "career_process_attempts": 0,
+                    "career_process_last_started_at": None,
+                    "career_process_updated_at": timestamp,
+                    "career_process_queued_at": timestamp,
+                    "updated_at": timestamp,
+                },
+                "$unset": {
+                    "career_process": "",
+                    "career_process_last_completed_at": "",
+                    "career_process_last_error": "",
+                    "career_process_last_error_details": "",
+                    "career_process_dispatched_at": "",
+                },
+            },
+            upsert=True,
+        )
+
+    def _mirror_category_dispatch(self, registered_domain: str, timestamp: datetime) -> None:
         self._domain_tasks.update_one(
             {"registered_domain": registered_domain},
             {
                 "$set": {
+                    "career_process_dispatched_at": timestamp,
+                    "career_process_updated_at": timestamp,
+                    "updated_at": timestamp,
+                }
+            },
+        )
+
+    def _mirror_category_running(self, task: dict[str, Any], timestamp: datetime) -> None:
+        self._domain_tasks.update_one(
+            {"registered_domain": task["registered_domain"]},
+            {
+                "$set": {
+                    "career_process_status": "running",
+                    "career_process_worker_name": task.get("worker_name"),
+                    "career_process_celery_task_id": task.get("celery_task_id"),
+                    "career_process_last_started_at": timestamp,
+                    "career_process_heartbeat_at": timestamp,
+                    "career_process_lease_expires_at": timestamp + timedelta(seconds=self._settings.stale_task_seconds),
+                    "career_process_updated_at": timestamp,
+                    "updated_at": timestamp,
+                },
+                "$inc": {"career_process_attempts": 1},
+                "$unset": {"career_process_last_error": "", "career_process_dispatched_at": ""},
+            },
+            upsert=True,
+        )
+
+    def _mirror_category_completed(
+        self,
+        registered_domain: str,
+        clean_result: dict[str, Any],
+        ignored_candidates: list[dict[str, Any]],
+        timestamp: datetime,
+    ) -> None:
+        self._domain_tasks.update_one(
+            {"registered_domain": registered_domain},
+            {
+                "$set": {
+                    "career_process_status": "completed",
+                    "career_process": clean_result,
+                    "career_process_last_outcome": clean_result.get("outcome"),
+                    "career_process_last_failure_type": None,
+                    "career_process_last_completed_at": timestamp,
+                    "career_process_updated_at": timestamp,
+                    "career_candidate_ignore_urls": ignored_candidates,
+                    "updated_at": timestamp,
+                },
+                "$unset": {
+                    "career_process_worker_name": "",
+                    "career_process_celery_task_id": "",
+                    "career_process_heartbeat_at": "",
+                    "career_process_lease_expires_at": "",
+                    "career_process_last_error": "",
+                    "career_process_last_error_details": "",
+                },
+            },
+            upsert=True,
+        )
+
+    def _mirror_category_failed(
+        self,
+        registered_domain: str,
+        error: str,
+        timestamp: datetime,
+        *,
+        error_details: dict[str, Any] | None = None,
+    ) -> None:
+        failure_type = classify_failure(error)
+        self._domain_tasks.update_one(
+            {"registered_domain": registered_domain},
+            {
+                "$set": {
+                    "registered_domain": registered_domain,
                     "career_process_status": "failed",
                     "career_process_last_error": error,
-                    "career_process_last_failure_type": classify_failure(error),
+                    "career_process_last_failure_type": failure_type,
+                    "career_process_last_error_details": error_details
+                    or {
+                        "error": error,
+                        "failure_type": failure_type,
+                        "failed_at": timestamp,
+                    },
                     "career_process_updated_at": timestamp,
                     "updated_at": timestamp,
                 },
@@ -285,18 +597,26 @@ class CareerProcessService:
                     "career_process_celery_task_id": "",
                 },
             },
+            upsert=True,
         )
-        if process_id:
-            self.mark_process_task_failed(process_id, error)
 
-    def requeue_task(self, registered_domain: str, error: str, *, decrement_attempt: bool = False) -> None:
+    def _mirror_category_requeued(
+        self,
+        registered_domain: str,
+        error: str,
+        timestamp: datetime,
+        *,
+        decrement_attempt: bool = False,
+    ) -> None:
+        if not registered_domain:
+            return
         update: dict[str, Any] = {
             "$set": {
                 "career_process_status": "queued",
                 "career_process_last_error": error,
                 "career_process_last_failure_type": classify_failure(error),
-                "career_process_updated_at": _now(),
-                "updated_at": _now(),
+                "career_process_updated_at": timestamp,
+                "updated_at": timestamp,
             },
             "$unset": {
                 "career_process_worker_name": "",
@@ -305,46 +625,17 @@ class CareerProcessService:
         }
         if decrement_attempt:
             update["$inc"] = {"career_process_attempts": -1}
-        self._domain_tasks.update_one(self._task_filter(registered_domain, "running"), update)
+        self._domain_tasks.update_one({"registered_domain": registered_domain}, update)
 
-    def active_process_run(self, process: dict[str, Any]) -> bool:
-        return process.get("career_status") in {"queued", "running"}
-
-    def requeue_stale_category_tasks(self) -> int:
-        self.ensure_indexes()
-        threshold = _now() - timedelta(seconds=self._settings.stale_task_seconds)
-        result = self._domain_tasks.update_many(
-            {
-                "career_process_status": "running",
-                "career_process_last_started_at": {"$lt": threshold},
-            },
-            {
-                "$set": {
-                    "career_process_status": "queued",
-                    "career_process_last_error": "Requeued stale category task",
-                    "career_process_updated_at": _now(),
-                    "updated_at": _now(),
-                },
-                "$unset": {
-                    "career_process_worker_name": "",
-                    "career_process_celery_task_id": "",
-                },
-            },
-        )
-        if result.modified_count:
-            log_event(logger, "warning", "stale_category_tasks_requeued", domain="watchdog", count=result.modified_count)
-        return int(result.modified_count)
-
-    def queued_category_tasks_for_watchdog(self) -> list[dict[str, Any]]:
-        self.ensure_indexes()
-        return list(self._domain_tasks.find({"career_process_status": "queued"}))
-
-    def _task_filter(self, registered_domain: str, status: str) -> dict[str, Any]:
-        return {"registered_domain": registered_domain, "career_process_status": status}
-
-    def _clean_category_result(self, result: dict[str, Any], timestamp: datetime) -> dict[str, Any]:
+    def _clean_category_result(
+        self,
+        result: dict[str, Any],
+        timestamp: datetime,
+        *,
+        previous_state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         overview = dict(result.get("overview") or {})
-        return {
+        clean_result = {
             "status": "completed",
             "career_urls": list(result.get("career_urls") or []),
             "career_urls_checked": self._career_urls_checked(result),
@@ -368,6 +659,91 @@ class CareerProcessService:
             "processed_at": result.get("processed_at"),
             "updated_at": timestamp,
         }
+        clean_result["outcome_category"] = self._outcome_category(clean_result)
+        clean_result["change_judgement"] = self._change_judgement(clean_result, previous_state or {})
+        clean_result["previous_state"] = self._previous_state_summary(previous_state or {})
+        return clean_result
+
+    def _previous_category_state(self, registered_domain: str) -> dict[str, Any]:
+        category_run = self._category_runs.find_one(
+            {"category_run_key": self._category_run_key(registered_domain)},
+            {"result": 1, "last_completed_at": 1},
+        )
+        legacy_task = self._domain_tasks.find_one(
+            {"registered_domain": registered_domain},
+            {"career_process": 1, "career_process_last_completed_at": 1, "job_pattern_result": 1},
+        )
+        if not category_run and not legacy_task:
+            return {}
+        career_process = (category_run or {}).get("result") or (legacy_task or {}).get("career_process") or {}
+        job_pattern_result = (legacy_task or {}).get("job_pattern_result") or {}
+        return {
+            "outcome": career_process.get("outcome"),
+            "jobs_found": bool(career_process.get("jobs_found")),
+            "job_found_on_urls": list(career_process.get("job_found_on_urls") or []),
+            "job_listing_patterns": list(career_process.get("job_listing_patterns") or []),
+            "pattern_count": len(career_process.get("job_listing_patterns") or []),
+            "job_pattern_count": len(job_pattern_result.get("job_listing_patterns") or []),
+            "last_completed_at": (category_run or {}).get("last_completed_at")
+            or (legacy_task or {}).get("career_process_last_completed_at"),
+        }
+
+    def _previous_state_summary(self, previous_state: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in {
+                "outcome": previous_state.get("outcome"),
+                "jobs_found": previous_state.get("jobs_found"),
+                "pattern_count": int(previous_state.get("pattern_count") or 0),
+                "job_pattern_count": int(previous_state.get("job_pattern_count") or 0),
+                "last_completed_at": previous_state.get("last_completed_at"),
+            }.items()
+            if value not in (None, "", [])
+        }
+
+    def _outcome_category(self, result: dict[str, Any]) -> str:
+        outcome = str(result.get("outcome") or "")
+        if result.get("jobs_found"):
+            return "jobs_available"
+        if outcome in {"career_page_no_vacancies", "career_page_no_vacancies_with_job_alert", "no_jobs_but_job_alert_available"}:
+            return "no_current_jobs"
+        if outcome in {"access_issue", "blocked_platform", "navigation_blocked", "embedded_job_board", "external_domain_redirect_no_jobs", "unknown"}:
+            return "needs_review"
+        if outcome in {"not_job_related"}:
+            return "not_job_related"
+        if outcome in {"career_page_general_job_info", "career_page_partial_access"}:
+            return "career_page_without_listings"
+        return "unknown"
+
+    def _change_judgement(self, result: dict[str, Any], previous_state: dict[str, Any]) -> dict[str, Any]:
+        previous_had_jobs = bool(previous_state.get("jobs_found")) or self._previous_had_patterns(previous_state)
+        outcome_category = self._outcome_category(result)
+        judgement = "unchanged_or_first_run"
+        action = "continue_pipeline_if_jobs_found"
+        if previous_had_jobs and outcome_category == "no_current_jobs":
+            judgement = "jobs_removed_or_no_current_vacancies"
+            action = "pause_job_extraction_until_jobs_reappear"
+        elif previous_had_jobs and outcome_category == "needs_review":
+            judgement = "previous_jobs_now_unverified"
+            action = "keep_existing_pattern_but_do_not_trust_this_as_no_jobs"
+        elif previous_had_jobs and outcome_category == "not_job_related":
+            judgement = "previous_jobs_now_not_job_related"
+            action = "exclude_checked_url_but_review_before_deleting_patterns"
+        elif not previous_had_jobs and outcome_category == "no_current_jobs":
+            judgement = "confirmed_no_current_jobs"
+            action = "do_not_run_pattern_or_job_extraction"
+        elif outcome_category == "jobs_available":
+            judgement = "jobs_available"
+            action = "continue_to_pattern_or_job_extraction"
+        return {
+            "judgement": judgement,
+            "action": action,
+            "previous_had_jobs": previous_had_jobs,
+            "outcome_category": outcome_category,
+        }
+
+    def _previous_had_patterns(self, previous_state: dict[str, Any]) -> bool:
+        return int(previous_state.get("pattern_count") or 0) > 0 or int(previous_state.get("job_pattern_count") or 0) > 0
 
     def _career_urls_checked(self, result: dict[str, Any]) -> list[dict[str, Any]]:
         checked = []

@@ -42,6 +42,7 @@ class SearchNodeProcessor:
         try:
             return asyncio.run(self._process_async(domain_ref, slot))
         except Exception as exc:
+            self._log_processing_exception(domain_ref, slot, exc)
             self._mark_slot_stale(slot, str(exc))
             raise
         finally:
@@ -77,7 +78,7 @@ class SearchNodeProcessor:
                 browser_session = await self._attach_browser(session.cdp_url)
                 self._log_browser_attached(domain_ref, session.session_id)
                 self._heartbeat(slot)
-                node_result = await self._run_search_node(domain_ref, browser_session)
+                node_result = await self._run_search_node(domain_ref, browser_session, slot)
                 self._heartbeat(slot)
                 return self._result(domain_ref, slot, node_result, time.monotonic() - started)
             finally:
@@ -96,13 +97,14 @@ class SearchNodeProcessor:
             raise RuntimeError("Could not attach Playwright to Selenium session")
         return browser_session
 
-    async def _run_search_node(self, domain_ref: dict[str, Any], browser_session: Any) -> dict[str, Any]:
+    async def _run_search_node(self, domain_ref: dict[str, Any], browser_session: Any, slot: dict[str, Any]) -> dict[str, Any]:
         target = str(domain_ref.get("domain") or domain_ref["registered_domain"])
         self._log_started(domain_ref, target)
         return await career_url_extraction_node(
             target,
             browser_session,
             registered_domain=domain_ref["registered_domain"],
+            heartbeat=lambda: self._heartbeat(slot),
         )
 
     async def _close_selenium_session(self, slot: dict[str, Any], session: Any) -> None:
@@ -129,6 +131,8 @@ class SearchNodeProcessor:
             "non_domain_career_urls": node_result.get("non_domain_career_urls", []),
             "all_urls": node_result.get("all_urls", []),
             "diagnostics": node_result.get("diagnostics", {}),
+            "source_type": "search_engine",
+            "cache_scope": "shared_domain",
             "status": node_result.get("status"),
             "success": success,
             "error": node_result.get("error_message"),
@@ -214,6 +218,10 @@ class SearchNodeProcessor:
             "career_urls": [career_url],
             "non_domain_career_urls": [],
             "all_urls": [career_url],
+            "diagnostics": {"source": "user_supplied_career_url"},
+            "source_type": "process_supplied_career_url",
+            "cache_scope": "process_only",
+            "uses_process_supplied_career_url": True,
             "status": "career_url_supplied",
             "success": True,
             "error": None,
@@ -224,3 +232,18 @@ class SearchNodeProcessor:
             "session_index": None,
             "processed_at": _now_iso(),
         }
+
+    def _log_processing_exception(self, domain_ref: dict[str, Any], slot: dict[str, Any], exc: Exception) -> None:
+        log_event(
+            logger,
+            "exception",
+            "search_node_processing_exception",
+            domain="search_node",
+            registered_domain=domain_ref["registered_domain"],
+            selenium_node_id=slot.get("selenium_node_id"),
+            slot_id=slot.get("slot_id"),
+            worker_name=domain_ref.get("worker_name"),
+            celery_task_id=domain_ref.get("celery_task_id"),
+            error=str(exc),
+            exc_info=True,
+        )

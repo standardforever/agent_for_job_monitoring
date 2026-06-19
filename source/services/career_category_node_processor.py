@@ -126,6 +126,7 @@ class CareerCategoryNodeProcessor:
             browser_session,
             agent_index=int(slot.get("session_index") or 0),
             agent_tab={"handle": None},
+            heartbeat=lambda: self._heartbeat(slot),
         )
 
     async def _close_selenium_session(self, slot: dict[str, Any], session: Any) -> None:
