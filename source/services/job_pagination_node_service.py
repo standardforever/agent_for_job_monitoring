@@ -101,7 +101,7 @@ class JobPaginationNodeService:
                 "process_id": process["process_id"],
                 "registered_domain": ref["registered_domain"],
                 "domain": ref.get("domain"),
-                "status": "blocked",
+                "status": "blocked_not_jobs",
                 "last_error": self._category_block_reason(category_result),
                 "input": {"job_listing_patterns": []},
             }
@@ -111,7 +111,7 @@ class JobPaginationNodeService:
                 "process_id": process["process_id"],
                 "registered_domain": ref["registered_domain"],
                 "domain": ref.get("domain"),
-                "status": "blocked",
+                "status": "skipped_no_pattern",
                 "last_error": "No active job listing patterns are available for pagination validation",
                 "input": {"job_listing_patterns": []},
             }
@@ -247,7 +247,7 @@ class JobPaginationNodeService:
                 completed += 1
                 self._mark_reused_task(task)
                 continue
-            if task["status"] == "blocked":
+            if task["status"] in {"blocked", "blocked_not_jobs", "skipped_no_pattern"}:
                 blocked += 1
                 self._mark_blocked_task(task)
                 continue
@@ -300,7 +300,7 @@ class JobPaginationNodeService:
                     "registered_domain": task["registered_domain"],
                     "domain": task.get("domain"),
                     "last_process_id": task.get("process_id"),
-                    "status": "blocked_no_pagination",
+                    "status": task["status"],
                     "input": task["input"],
                     "last_error": task["last_error"],
                     "last_error_details": error_details,
@@ -321,7 +321,7 @@ class JobPaginationNodeService:
                     "job_pagination_run_key": self._pagination_run_key(task["registered_domain"]),
                     "$or": [
                         {"status": {"$exists": False}},
-                        {"status": {"$in": ["failed", "completed", "blocked_no_pagination"]}},
+                        {"status": {"$in": ["failed", "completed", "blocked_no_pagination", "blocked_not_jobs", "skipped_no_pattern"]}},
                     ],
                 },
                 {
@@ -737,7 +737,7 @@ class JobPaginationNodeService:
                 "$set": {
                     "registered_domain": task["registered_domain"],
                     "domain": task.get("domain"),
-                    "job_pagination_status": "blocked_no_pagination",
+                    "job_pagination_status": task["status"],
                     "job_pagination_last_error": task["last_error"],
                     "job_pagination_last_error_details": error_details,
                     "job_pagination_updated_at": timestamp,
