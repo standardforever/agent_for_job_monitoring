@@ -113,6 +113,7 @@ class JobExtractionNodeProcessor:
             try:
                 self._log_session_create_started(task, slot)
                 session = await self._create_selenium_session(slot)
+                self._attach_session(slot, session.session_id)
                 self._heartbeat(slot)
                 browser_session = await self._attach_browser(session.cdp_url)
                 self._heartbeat(slot)
@@ -127,6 +128,9 @@ class JobExtractionNodeProcessor:
         if not session or not session.cdp_url:
             raise NoJobExtractionSessionSlotAvailable("Could not create Selenium session for job extraction node")
         return session
+
+    def _attach_session(self, slot: dict[str, Any], session_id: str) -> None:
+        get_selenium_session_slot_service().attach_session(slot["slot_id"], session_id)
 
     async def _attach_browser(self, cdp_url: str):
         browser_session = await attach_playwright_to_cdp(cdp_url, raise_on_failure=True)

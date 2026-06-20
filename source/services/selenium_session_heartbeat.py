@@ -32,7 +32,8 @@ class SeleniumSessionHeartbeat:
         self.stop()
 
     def beat(self) -> None:
-        get_selenium_session_slot_service().heartbeat_slot(self._slot_id)
+        if not get_selenium_session_slot_service().heartbeat_slot(self._slot_id):
+            self._stopped.set()
 
     def stop(self) -> None:
         self._stopped.set()

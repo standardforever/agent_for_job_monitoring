@@ -102,6 +102,7 @@ class JobPaginationNodeProcessor:
             try:
                 self._log_session_create_started(task, slot)
                 session = await self._create_selenium_session(slot)
+                self._attach_session(slot, session.session_id)
                 self._heartbeat(slot)
                 patterns = await self._run_patterns(task, session.cdp_url, slot)
                 return self._result(task, patterns, time.monotonic() - started)
@@ -113,6 +114,9 @@ class JobPaginationNodeProcessor:
         if not session or not session.cdp_url:
             raise NoJobPaginationSessionSlotAvailable("Could not create Selenium session for job pagination node")
         return session
+
+    def _attach_session(self, slot: dict[str, Any], session_id: str) -> None:
+        get_selenium_session_slot_service().attach_session(slot["slot_id"], session_id)
 
     async def _run_patterns(self, task: dict[str, Any], cdp_url: str, slot: dict[str, Any]) -> list[dict[str, Any]]:
         results = []

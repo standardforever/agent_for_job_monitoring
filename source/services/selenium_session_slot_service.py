@@ -5,6 +5,7 @@ from functools import lru_cache
 from typing import Any
 from urllib.parse import urlparse
 
+import requests
 from pymongo import ASCENDING, ReturnDocument, UpdateOne
 
 from core.config import Settings, get_settings
@@ -193,9 +194,11 @@ class SeleniumSessionSlotService:
             registered_domain=registered_domain,
         )
 
-    def heartbeat_slot(self, slot_id: str) -> None:
+    def heartbeat_slot(self, slot_id: str) -> bool:
+        if not self._slot_has_live_session(slot_id):
+            return False
         timestamp = _now()
-        self._slots.update_one(
+        result = self._slots.update_one(
             {"slot_id": slot_id, "status": "busy"},
             {
                 "$set": {
@@ -204,6 +207,13 @@ class SeleniumSessionSlotService:
                     "updated_at": timestamp,
                 }
             },
+        )
+        return bool(result.modified_count)
+
+    def attach_session(self, slot_id: str, session_id: str) -> None:
+        self._slots.update_one(
+            {"slot_id": slot_id, "status": "busy"},
+            {"$set": {"current_session_id": session_id, "updated_at": _now()}},
         )
 
     def release_slot(self, slot_id: str) -> None:
@@ -258,7 +268,56 @@ class SeleniumSessionSlotService:
             "lease_expires_at": "",
             "current_process_id": "",
             "current_domain": "",
+            "current_session_id": "",
         }
+
+    def _slot_has_live_session(self, slot_id: str) -> bool:
+        slot = self._slots.find_one(
+            {"slot_id": slot_id, "status": "busy"},
+            {"grid_url": 1, "current_session_id": 1},
+        )
+        if not slot:
+            return False
+        session_id = str(slot.get("current_session_id") or "").strip()
+        if not session_id:
+            return True
+        if self._is_grid_session_active(str(slot.get("grid_url") or ""), session_id):
+            return True
+        self.mark_slot_stale(slot_id, "Selenium session is no longer active")
+        log_event(
+            logger,
+            "warning",
+            "selenium_session_slot_dead_session_detected",
+            domain="selenium",
+            slot_id=slot_id,
+            session_id=session_id,
+        )
+        return False
+
+    def _is_grid_session_active(self, grid_url: str, session_id: str) -> bool:
+        try:
+            parsed = urlparse(grid_url if "://" in grid_url else f"http://{grid_url}")
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+            response = requests.get(f"{base_url}/status", timeout=5)
+            if response.status_code != 200:
+                return True
+            nodes = response.json().get("value", {}).get("nodes", [])
+            for node in nodes:
+                for slot in node.get("slots", []):
+                    active_session = slot.get("session")
+                    if active_session and str(active_session.get("sessionId")) == session_id:
+                        return True
+            return False
+        except Exception as exc:
+            log_event(
+                logger,
+                "warning",
+                "selenium_session_active_check_failed",
+                domain="selenium",
+                session_id=session_id,
+                error=str(exc),
+            )
+            return True
 
 
 @lru_cache(maxsize=1)
