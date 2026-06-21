@@ -81,13 +81,15 @@ class CareerCategoryNodeService:
         return task
 
     def _career_url_candidates(self, ref: dict[str, Any]) -> list[str]:
-        supplied = str(ref.get("career_url") or "").strip()
+        supplied = str(ref.get("supplied_career_url") or "").strip()
         if supplied:
             return [supplied]
         result = self._shared_search_result(ref["registered_domain"])
-        values = list(result.get("career_urls") or [])
-        if result.get("career_url"):
-            values.insert(0, result["career_url"])
+        values = list(ref.get("career_urls") or [])
+        values.extend(list(result.get("career_urls") or []))
+        preferred = result.get("career_url") or ref.get("career_url")
+        if preferred:
+            values.insert(0, preferred)
         return self._filter_ignored_candidates(ref["registered_domain"], self._dedupe_urls(values))
 
     def _shared_search_result(self, registered_domain: str) -> dict[str, Any]:

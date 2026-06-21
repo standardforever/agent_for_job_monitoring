@@ -325,6 +325,8 @@ class ProcessRuntimeService:
 
     def _completed_ref(self, ref: dict[str, Any], reused: bool, result: dict[str, Any] | None = None) -> dict[str, Any]:
         completed = self._clean_runtime_ref(ref)
+        if completed.get("career_url") and not completed.get("supplied_career_url"):
+            completed["supplied_career_url"] = completed["career_url"]
         completed["reused"] = reused
         completed["completed_at"] = _now()
         if result:
