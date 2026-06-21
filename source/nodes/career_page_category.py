@@ -333,15 +333,22 @@ async def career_page_category_node(
             _send_heartbeat(heartbeat)
 
             if extracted_content_response is None or not extracted_content_response.get("markdown"):
+                extraction_error = (
+                    str((extracted_content_response or {}).get("error") or "").strip()
+                    or "empty_page_content"
+                )
                 log_event(
                     logger,
                     "warning",
-                    "page_content_extraction_failed navigate_to=%s",
+                    "page_content_extraction_failed navigate_to=%s error=%s",
                     career_url,
+                    extraction_error,
                     domain=career_url,
                     navigate_to=career_url,
+                    error=extraction_error,
                 )
                 navigation_result["error"] = "Unable to extract page content"
+                navigation_result["detail"] = extraction_error
                 navigation_result["status"] = "extraction_failed"
                 break
 

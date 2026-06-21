@@ -712,17 +712,46 @@ async def extract_page_content(
     custom_script: str | None = None,
 ) -> dict | None:
     if page is None:
-        return None
+        return {"markdown": "", "error": "page_not_available"}
 
-    # preparation = await prepare_page_for_extraction(page)
-    script = custom_script or await page_extraction()
     extraction_sections = sections or ["body"]
-    result: Any = await page.evaluate(script, {"sections": extraction_sections})
-    
-    if not isinstance(result, dict):
-        return None
+    preparation: dict[str, Any] | None = None
+    result: Any = None
+    error: str | None = None
 
-    title = await page.title()
+    try:
+        script = custom_script or await page_extraction()
+        result = await page.evaluate(script, {"sections": extraction_sections})
+    except Exception as exc:
+        error = str(exc)
+
+    if not isinstance(result, dict) or not str(result.get("content", "") or "").strip():
+        preparation = await prepare_page_for_extraction(page)
+        try:
+            script = custom_script or await page_extraction()
+            result = await page.evaluate(script, {"sections": extraction_sections})
+        except Exception as exc:
+            error = str(exc)
+
+    if not isinstance(result, dict) or not str(result.get("content", "") or "").strip():
+        fallback = await _fallback_body_content(page)
+        if fallback["content"]:
+            result = fallback
+        else:
+            return {
+                "title": await _safe_title(page),
+                "url": await _safe_url(page),
+                "markdown": "",
+                "error": error or fallback.get("error") or "empty_page_content",
+                "metadata": {
+                    "sections": extraction_sections,
+                    "selector_map": {},
+                    "preparation": preparation,
+                    "fallback": fallback,
+                },
+            }
+
+    title = await _safe_title(page)
     page_url = str(result.get("page_url", "") or page.url or "")
     content = str(result.get("content", "") or "")
     selector_map = result.get("selector_map", {})
@@ -744,6 +773,45 @@ async def extract_page_content(
         "metadata": {
             "sections": extraction_sections,
             "selector_map": dict(selector_map or {}),
-            # "preparation": preparation,
+            "preparation": preparation,
         },
     }
+
+
+async def _fallback_body_content(page: Page) -> dict[str, Any]:
+    try:
+        content = await page.locator("body").inner_text(timeout=5_000)
+        content = str(content or "").strip()
+        if content:
+            return {"page_url": page.url, "content": content, "selector_map": {}, "source": "body_inner_text"}
+    except Exception as exc:
+        inner_text_error = str(exc)
+    else:
+        inner_text_error = None
+
+    try:
+        content = await page.locator("body").text_content(timeout=5_000)
+        content = str(content or "").strip()
+        return {
+            "page_url": page.url,
+            "content": content,
+            "selector_map": {},
+            "source": "body_text_content",
+            "error": inner_text_error,
+        }
+    except Exception as exc:
+        return {"page_url": await _safe_url(page), "content": "", "selector_map": {}, "error": str(exc)}
+
+
+async def _safe_title(page: Page) -> str:
+    try:
+        return await page.title()
+    except Exception:
+        return ""
+
+
+async def _safe_url(page: Page) -> str:
+    try:
+        return str(page.url or "")
+    except Exception:
+        return ""
