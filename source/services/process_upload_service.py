@@ -245,13 +245,16 @@ class ProcessUploadService:
             await self._process_domain_refs.bulk_write(operations, ordered=False)
 
     def _process_domain_ref_upsert(self, process_id: str, ref: dict[str, Any], timestamp: datetime) -> UpdateOne:
-        process_domain = self._process_domain(ref, timestamp)
         return UpdateOne(
             {"process_id": process_id, "registered_domain": ref["registered_domain"]},
             {
                 "$setOnInsert": {
-                    **process_domain,
                     "process_id": process_id,
+                    "registered_domain": ref["registered_domain"],
+                    "enabled": True,
+                    "stop_reason": None,
+                    "stopped_at": None,
+                    "node_controls": self._node_controls(),
                     "schema_version": PROCESS_DOMAIN_REF_SCHEMA_VERSION,
                     "status": "queued",
                     "created_at": timestamp,

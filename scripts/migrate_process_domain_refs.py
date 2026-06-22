@@ -161,7 +161,14 @@ def migrate(*, apply: bool, compact: bool) -> None:
         operations = [
             UpdateOne(
                 {"process_id": ref["process_id"], "registered_domain": ref["registered_domain"]},
-                {"$setOnInsert": {"created_at": ref["created_at"]}, "$set": ref},
+                {
+                    "$setOnInsert": {
+                        "process_id": ref["process_id"],
+                        "registered_domain": ref["registered_domain"],
+                        "created_at": ref["created_at"],
+                    },
+                    "$set": ref_updates(ref),
+                },
                 upsert=True,
             )
             for ref in process_refs
@@ -178,6 +185,10 @@ def migrate(*, apply: bool, compact: bool) -> None:
 
     mode = "APPLIED" if apply else "DRY RUN"
     print(f"{mode}: processes={process_count}, refs={ref_count}, compacted={compact_count}")
+
+
+def ref_updates(ref: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in ref.items() if key not in {"process_id", "registered_domain", "created_at"}}
 
 
 def main() -> None:

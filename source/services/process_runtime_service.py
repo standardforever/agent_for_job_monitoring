@@ -221,7 +221,7 @@ class ProcessRuntimeService:
                     "created_at": ref.get("created_at") or timestamp,
                 },
                 "$set": {
-                    **self._clean_runtime_ref(ref),
+                    **self._legacy_ref_updates(ref),
                     "status": status,
                     "domain": ref.get("domain"),
                     "career_url": ref.get("career_url") or ref.get("supplied_career_url"),
@@ -232,6 +232,12 @@ class ProcessRuntimeService:
             },
             upsert=True,
         )
+
+    def _legacy_ref_updates(self, ref: dict[str, Any]) -> dict[str, Any]:
+        cleaned = self._clean_runtime_ref(ref)
+        for key in ("process_id", "registered_domain", "created_at"):
+            cleaned.pop(key, None)
+        return cleaned
 
     def _compact_process_document(self, process_id: str) -> None:
         self._processes.update_one(
