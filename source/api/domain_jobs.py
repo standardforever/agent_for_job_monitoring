@@ -45,24 +45,9 @@ async def _job_query(process_id: str | None, registered_domain: str | None) -> d
     if not process_id:
         return {"status": "active"}
     settings = get_settings()
-    processes = get_mongodb_service().collection(settings.mongodb_process_uploads_collection)
-    process = await processes.find_one({"process_id": process_id}, {"process_domains.registered_domain": 1, "domains.completed.registered_domain": 1})
-    domains = _process_domains(process or {})
+    refs = get_mongodb_service().collection(settings.mongodb_process_domain_refs_collection)
+    cursor = refs.find({"process_id": process_id, "status": "completed"}, {"registered_domain": 1})
+    domains = [str(document.get("registered_domain") or "") async for document in cursor if document.get("registered_domain")]
     if not domains:
         return {"registered_domain": {"$in": []}, "status": "active"}
     return {"registered_domain": {"$in": domains}, "status": "active"}
-
-
-def _process_domains(process: dict[str, Any]) -> list[str]:
-    domains = [
-        str(item.get("registered_domain") or "")
-        for item in process.get("process_domains") or []
-        if item.get("registered_domain")
-    ]
-    if domains:
-        return domains
-    return [
-        str(item.get("registered_domain") or "")
-        for item in ((process.get("domains") or {}).get("completed") or [])
-        if item.get("registered_domain")
-    ]

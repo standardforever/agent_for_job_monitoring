@@ -14,6 +14,7 @@ from services.job_extraction_node_service import get_job_extraction_node_service
 from services.job_pagination_node_service import get_job_pagination_node_service
 from services.job_pattern_node_service import get_job_pattern_node_service
 from services.node_lifecycle import ACTIVE_STATUSES, TERMINAL_STATUSES
+from services.process_domain_ref_service import get_process_domain_ref_service
 from services.search_node_service import get_search_node_service
 from services.sync_mongodb_service import SyncMongoDBService, get_sync_mongodb_service
 from utils.logging import get_logger, log_event
@@ -36,7 +37,12 @@ class PipelineOrchestratorService:
     def __init__(self, mongodb: SyncMongoDBService, settings: Settings) -> None:
         self._settings = settings
         self._processes = mongodb.collection(settings.mongodb_process_uploads_collection)
+        self._process_refs = mongodb.collection(settings.mongodb_process_domain_refs_collection)
         self._domain_tasks = mongodb.collection(settings.mongodb_process_domain_tasks_collection)
+        self._category_runs = mongodb.collection(settings.mongodb_career_category_runs_collection)
+        self._pattern_runs = mongodb.collection(settings.mongodb_job_pattern_runs_collection)
+        self._pagination_runs = mongodb.collection(settings.mongodb_job_pagination_runs_collection)
+        self._extraction_runs = mongodb.collection(settings.mongodb_job_extraction_runs_collection)
         self._jobs = mongodb.collection(settings.mongodb_domain_jobs_collection)
         self._pipeline_runs = mongodb.collection(settings.mongodb_pipeline_runs_collection)
         self._reports = mongodb.collection(settings.mongodb_client_job_reports_collection)
@@ -47,6 +53,9 @@ class PipelineOrchestratorService:
             return
         self._processes.create_index([("pipeline_enabled", ASCENDING), ("next_pipeline_run_at", ASCENDING)])
         self._processes.create_index([("pipeline_status", ASCENDING), ("pipeline_heartbeat_at", ASCENDING)])
+        self._process_refs.create_index([("process_id", ASCENDING), ("status", ASCENDING), ("lease_expires_at", ASCENDING)])
+        for collection in (self._category_runs, self._pattern_runs, self._pagination_runs, self._extraction_runs):
+            collection.create_index([("last_process_id", ASCENDING), ("status", ASCENDING), ("lease_expires_at", ASCENDING)])
         self._pipeline_runs.create_index([("pipeline_run_id", ASCENDING)], unique=True)
         self._pipeline_runs.create_index([("status", ASCENDING), ("heartbeat_at", ASCENDING)])
         self._pipeline_runs.create_index([("process_id", ASCENDING), ("started_at", DESCENDING)])
@@ -388,17 +397,78 @@ class PipelineOrchestratorService:
         return not last_run or last_run <= _now() - timedelta(hours=self._settings.pipeline_category_refresh_hours)
 
     def _wait_for_process_status(self, process_id: str, status_field: str, *, pipeline_stage: str) -> str:
-        deadline = time.monotonic() + self._settings.pipeline_node_wait_timeout_seconds
-        while time.monotonic() < deadline:
+        timeout_seconds = max(60, self._settings.pipeline_node_wait_timeout_seconds)
+        stale_deadline = time.monotonic() + timeout_seconds
+        last_progress = None
+        while True:
             process = self._load_process(process_id)
             status = str(process.get(status_field) or "")
+            progress = self._stage_progress_signature(process, status_field, pipeline_stage)
+            live_work = self._stage_has_live_work(process_id, pipeline_stage)
+            if progress != last_progress or live_work:
+                stale_deadline = time.monotonic() + timeout_seconds
+                last_progress = progress
             self._heartbeat(str(process.get("pipeline_current_run_id") or ""), process_id, pipeline_stage)
             if status in TERMINAL_STATUSES:
                 return status
             if status not in ACTIVE_STATUSES:
                 return status or "unknown"
+            if time.monotonic() >= stale_deadline:
+                raise TimeoutError(
+                    f"Pipeline stage '{pipeline_stage}' timed out waiting for {status_field}; "
+                    f"no live work or progress for {timeout_seconds} seconds"
+                )
             time.sleep(max(1, self._settings.pipeline_poll_interval_seconds))
-        raise TimeoutError(f"Pipeline stage '{pipeline_stage}' timed out waiting for {status_field}")
+
+    def _stage_progress_signature(self, process: dict[str, Any], status_field: str, pipeline_stage: str) -> tuple[Any, ...]:
+        totals = self._stage_totals(process, pipeline_stage)
+        keys = (
+            "domains",
+            "queued",
+            "processing",
+            "running",
+            "completed",
+            "failed",
+            "blocked",
+            "no_listing",
+            "no_pagination",
+        )
+        return (process.get(status_field),) + tuple(int(totals.get(key) or 0) for key in keys)
+
+    def _stage_totals(self, process: dict[str, Any], pipeline_stage: str) -> dict[str, Any]:
+        field_by_stage = {
+            "search": "totals",
+            "category": "career_totals",
+            "pattern": "job_pattern_totals",
+            "pagination": "job_pagination_totals",
+            "jobs": "job_extraction_totals",
+        }
+        return process.get(field_by_stage.get(pipeline_stage, "")) or {}
+
+    def _stage_has_live_work(self, process_id: str, pipeline_stage: str) -> bool:
+        query = self._live_work_query(process_id, pipeline_stage)
+        if not query:
+            return False
+        collection, filter_query = query
+        return collection.count_documents(filter_query, limit=1) > 0
+
+    def _live_work_query(self, process_id: str, pipeline_stage: str) -> tuple[Any, dict[str, Any]] | None:
+        lease_filter = {"status": "running", "lease_expires_at": {"$gt": _now()}}
+        if pipeline_stage == "search":
+            return self._process_refs, {
+                "process_id": process_id,
+                "status": "processing",
+                "lease_expires_at": {"$gt": _now()},
+            }
+        if pipeline_stage == "category":
+            return self._category_runs, {"last_process_id": process_id, **lease_filter}
+        if pipeline_stage == "pattern":
+            return self._pattern_runs, {"last_process_id": process_id, **lease_filter}
+        if pipeline_stage == "pagination":
+            return self._pagination_runs, {"last_process_id": process_id, **lease_filter}
+        if pipeline_stage == "jobs":
+            return self._extraction_runs, {"last_process_id": process_id, **lease_filter}
+        return None
 
     def _remember_stage_timestamp(self, process_id: str, field: str) -> None:
         self._processes.update_one({"process_id": process_id}, {"$set": {field: _now(), "updated_at": _now()}})
@@ -431,8 +501,7 @@ class PipelineOrchestratorService:
         return (report or {}).get("generated_at")
 
     def _process_domains(self, process: dict[str, Any]) -> list[str]:
-        refs = list(process.get("domains", {}).get("completed", []) or [])
-        return [str(ref.get("registered_domain") or "") for ref in refs if ref.get("registered_domain")]
+        return get_process_domain_ref_service().registered_domains(process["process_id"], statuses=["completed"])
 
     def _new_jobs(self, domains: list[str], since: datetime | None) -> list[dict[str, Any]]:
         if not domains:

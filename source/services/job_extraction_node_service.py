@@ -13,6 +13,7 @@ from services.job_listing_pattern_store import dedupe_job_listing_patterns, merg
 from services.node_lifecycle import retry_policy, status_from_totals, terminal_status
 from services.node_preflight_service import get_node_preflight_service
 from services.process_control_service import get_process_control_service
+from services.process_domain_ref_service import get_process_domain_ref_service
 from services.sync_mongodb_service import SyncMongoDBService, get_sync_mongodb_service
 from utils.logging import get_logger, log_event
 
@@ -90,7 +91,7 @@ class JobExtractionNodeService:
         return tasks
 
     def _completed_refs(self, process: dict[str, Any]) -> list[dict[str, Any]]:
-        refs = list(process.get("domains", {}).get("completed", []) or [])
+        refs = get_process_domain_ref_service().refs_for_process(process["process_id"], statuses=["completed"])
         return get_process_control_service().filter_refs(process["process_id"], refs, "job_extraction")
 
     def _task_from_ref(self, process: dict[str, Any], ref: dict[str, Any], mode: str) -> dict[str, Any] | None:

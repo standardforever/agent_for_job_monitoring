@@ -7,6 +7,7 @@ from core.config import Settings, get_settings
 from services.career_process_service import get_career_process_service
 from services.node_preflight_service import get_node_preflight_service
 from services.process_control_service import get_process_control_service
+from services.process_domain_ref_service import get_process_domain_ref_service
 from services.search_run_service import get_search_run_service
 from services.sync_mongodb_service import SyncMongoDBService, get_sync_mongodb_service
 from utils.logging import get_logger, log_event
@@ -63,7 +64,7 @@ class CareerCategoryNodeService:
         return [self._task_from_ref(process, ref) for ref in self._completed_refs(process)]
 
     def _completed_refs(self, process: dict[str, Any]) -> list[dict[str, Any]]:
-        refs = list(process.get("domains", {}).get("completed", []) or [])
+        refs = get_process_domain_ref_service().refs_for_process(process["process_id"], statuses=["completed"])
         return get_process_control_service().filter_refs(process["process_id"], refs, "career_category")
 
     def _task_from_ref(self, process: dict[str, Any], ref: dict[str, Any]) -> dict[str, Any]:

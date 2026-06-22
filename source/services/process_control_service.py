@@ -10,20 +10,18 @@ from services.sync_mongodb_service import SyncMongoDBService, get_sync_mongodb_s
 class ProcessControlService:
     def __init__(self, mongodb: SyncMongoDBService, settings: Settings) -> None:
         self._processes = mongodb.collection(settings.mongodb_process_uploads_collection)
+        self._process_refs = mongodb.collection(settings.mongodb_process_domain_refs_collection)
 
     def domain_node_enabled(self, process_id: str, registered_domain: str, node: str) -> bool:
-        process = self._processes.find_one(
-            {"process_id": process_id},
-            {"process_domains": 1},
+        domain = self._process_refs.find_one(
+            {"process_id": process_id, "registered_domain": registered_domain},
+            {"enabled": 1, "node_controls": 1},
         )
-        if not process:
-            return False
-        process_domains = process.get("process_domains") or []
-        if not process_domains:
+        if domain is None:
+            process = self._processes.find_one({"process_id": process_id}, {"process_id": 1})
+            if not process:
+                return False
             return True
-        domain = self._find_domain(process_domains, registered_domain)
-        if not domain:
-            return False
         if domain.get("enabled") is False:
             return False
         control = (domain.get("node_controls") or {}).get(node) or {}
@@ -37,12 +35,6 @@ class ProcessControlService:
             for ref in refs
             if self.domain_node_enabled(process_id, str(ref.get("registered_domain") or ""), node)
         ]
-
-    def _find_domain(self, process_domains: list[dict[str, Any]], registered_domain: str) -> dict[str, Any] | None:
-        for item in process_domains:
-            if item.get("registered_domain") == registered_domain:
-                return item
-        return None
 
 
 @lru_cache(maxsize=1)

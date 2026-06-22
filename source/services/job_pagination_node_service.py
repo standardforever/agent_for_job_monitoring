@@ -13,6 +13,7 @@ from services.job_listing_pattern_store import dedupe_job_listing_patterns, merg
 from services.node_lifecycle import retry_policy, status_from_totals, terminal_status
 from services.node_preflight_service import get_node_preflight_service
 from services.process_control_service import get_process_control_service
+from services.process_domain_ref_service import get_process_domain_ref_service
 from services.sync_mongodb_service import SyncMongoDBService, get_sync_mongodb_service
 from utils.logging import get_logger, log_event
 
@@ -83,7 +84,7 @@ class JobPaginationNodeService:
         tasks = []
         refs = get_process_control_service().filter_refs(
             process["process_id"],
-            list(process.get("domains", {}).get("completed", []) or []),
+            get_process_domain_ref_service().refs_for_process(process["process_id"], statuses=["completed"]),
             "job_pagination",
         )
         for ref in refs:

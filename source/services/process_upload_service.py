@@ -12,12 +12,13 @@ from services.admin_client_service import get_admin_client_service
 from services.file_input_service import UploadDomainInput
 from services.mongodb_service import MongoDBService, get_mongodb_service
 from services.node_lifecycle import NOT_STARTED
+from services.process_domain_ref_service import PROCESS_DOMAIN_REF_SCHEMA_VERSION
 from utils.tld import registered_domain
 from utils.logging import get_logger, log_event
 
 
 logger = get_logger("process_upload_service")
-PROCESS_SCHEMA_VERSION = 2
+PROCESS_SCHEMA_VERSION = 3
 NODE_CONTROL_NAMES = ("search", "career_category", "job_pattern", "job_pagination", "job_extraction")
 
 
@@ -28,6 +29,7 @@ def _now() -> datetime:
 class ProcessUploadService:
     def __init__(self, mongodb: MongoDBService, settings: Settings) -> None:
         self._processes = mongodb.collection(settings.mongodb_process_uploads_collection)
+        self._process_domain_refs = mongodb.collection(settings.mongodb_process_domain_refs_collection)
         self._domain_tasks = mongodb.collection(settings.mongodb_process_domain_tasks_collection)
         self._search_runs = mongodb.collection(settings.mongodb_search_runs_collection)
         self._category_runs = mongodb.collection(settings.mongodb_career_category_runs_collection)
@@ -41,6 +43,7 @@ class ProcessUploadService:
             return
         await self._drop_legacy_domain_task_indexes()
         await self._create_process_indexes()
+        await self._create_process_domain_ref_indexes()
         await self._create_domain_task_indexes()
         await self._create_search_run_indexes()
         await self._create_node_run_indexes()
@@ -73,8 +76,12 @@ class ProcessUploadService:
         await self._processes.create_index([("process_id", ASCENDING)], unique=True)
         await self._processes.create_index([("client.client_name", ASCENDING), ("created_at", DESCENDING)])
         await self._processes.create_index([("status", ASCENDING), ("created_at", DESCENDING)])
-        await self._processes.create_index([("process_domains.registered_domain", ASCENDING)])
-        await self._processes.create_index([("process_domains.enabled", ASCENDING), ("updated_at", DESCENDING)])
+
+    async def _create_process_domain_ref_indexes(self) -> None:
+        await self._process_domain_refs.create_index([("process_id", ASCENDING), ("registered_domain", ASCENDING)], unique=True)
+        await self._process_domain_refs.create_index([("process_id", ASCENDING), ("status", ASCENDING), ("updated_at", ASCENDING)])
+        await self._process_domain_refs.create_index([("registered_domain", ASCENDING), ("process_id", ASCENDING)])
+        await self._process_domain_refs.create_index([("process_id", ASCENDING), ("enabled", ASCENDING)])
 
     async def _create_domain_task_indexes(self) -> None:
         await self._domain_tasks.create_index([("registered_domain", ASCENDING)], unique=True)
@@ -109,6 +116,7 @@ class ProcessUploadService:
         domain_refs = self._build_domain_refs(domain_inputs)
         process = self._build_process(client, agent_count, filename, domain_refs)
         await self._save_process(process)
+        await self._upsert_process_domain_refs(process["process_id"], domain_refs, process["created_at"])
         await self._upsert_domain_tasks(domain_refs)
         await self._upsert_search_runs(domain_refs)
         return self._serialize_process(process)
@@ -159,9 +167,8 @@ class ProcessUploadService:
             "pipeline_status": "idle",
             "next_pipeline_run_at": timestamp,
             "source_file": self._source_file(filename, domain_refs),
-            "process_domains": self._process_domains(domain_refs, timestamp),
             "totals": self._totals(domain_refs),
-            "domains": self._initial_domain_state(domain_refs),
+            "domains": self._empty_domain_state(),
             "created_at": timestamp,
             "updated_at": timestamp,
         }
@@ -231,6 +238,32 @@ class ProcessUploadService:
 
     async def _save_process(self, process: dict[str, Any]) -> None:
         await self._processes.insert_one(process)
+
+    async def _upsert_process_domain_refs(self, process_id: str, domain_refs: list[dict[str, Any]], timestamp: datetime) -> None:
+        operations = [self._process_domain_ref_upsert(process_id, ref, timestamp) for ref in domain_refs]
+        if operations:
+            await self._process_domain_refs.bulk_write(operations, ordered=False)
+
+    def _process_domain_ref_upsert(self, process_id: str, ref: dict[str, Any], timestamp: datetime) -> UpdateOne:
+        process_domain = self._process_domain(ref, timestamp)
+        return UpdateOne(
+            {"process_id": process_id, "registered_domain": ref["registered_domain"]},
+            {
+                "$setOnInsert": {
+                    **process_domain,
+                    "process_id": process_id,
+                    "schema_version": PROCESS_DOMAIN_REF_SCHEMA_VERSION,
+                    "status": "queued",
+                    "created_at": timestamp,
+                },
+                "$set": {
+                    "domain": ref["domain"],
+                    "career_url": ref.get("career_url"),
+                    "updated_at": timestamp,
+                },
+            },
+            upsert=True,
+        )
 
     async def _upsert_domain_tasks(self, domain_refs: list[dict[str, Any]]) -> None:
         operations = [self._domain_task_upsert(ref) for ref in domain_refs]
@@ -337,9 +370,9 @@ class ProcessUploadService:
             "last_pipeline_run_at": process.get("last_pipeline_run_at"),
             "next_pipeline_run_at": process.get("next_pipeline_run_at"),
             "source_file": process["source_file"],
-            "process_domains": process.get("process_domains") or self._process_domains_from_legacy(process),
+            "process_domains": process.get("process_domains") or [],
             "totals": process["totals"],
-            "domains": process.get("domains", self._empty_domain_state()),
+            "domains": process.get("domains") or self._empty_domain_state(),
             "created_at": process["created_at"],
             "updated_at": process["updated_at"],
         }
@@ -418,18 +451,21 @@ class ProcessUploadService:
         enabled: bool,
         reason: str | None,
     ) -> dict[str, Any]:
-        process = await self._ensure_process_schema(await self._load_process(process_id))
-        process_domains = list(process.get("process_domains") or [])
-        target = self._find_process_domain(process_domains, registered_domain)
         timestamp = _now()
-        target["enabled"] = enabled
-        target["stop_reason"] = None if enabled else reason or "Stopped by admin"
-        target["stopped_at"] = None if enabled else timestamp
-        target["updated_at"] = timestamp
-        await self._processes.update_one(
-            {"process_id": process_id},
-            {"$set": {"process_domains": process_domains, "updated_at": timestamp}},
+        result = await self._process_domain_refs.update_one(
+            {"process_id": process_id, "registered_domain": registered_domain},
+            {
+                "$set": {
+                    "enabled": enabled,
+                    "stop_reason": None if enabled else reason or "Stopped by admin",
+                    "stopped_at": None if enabled else timestamp,
+                    "updated_at": timestamp,
+                }
+            },
         )
+        if not result.matched_count:
+            raise ValueError(f"Domain '{registered_domain}' was not found in this process")
+        await self._processes.update_one({"process_id": process_id}, {"$set": {"updated_at": timestamp}})
         return {"process_id": process_id, "registered_domain": registered_domain, "enabled": enabled}
 
     async def _set_domain_node_enabled(
@@ -443,21 +479,21 @@ class ProcessUploadService:
     ) -> dict[str, Any]:
         if node not in NODE_CONTROL_NAMES:
             raise ValueError(f"Unknown node '{node}'")
-        process = await self._ensure_process_schema(await self._load_process(process_id))
-        process_domains = list(process.get("process_domains") or [])
-        target = self._find_process_domain(process_domains, registered_domain)
-        controls = target.setdefault("node_controls", self._node_controls())
+        target = await self._process_domain_refs.find_one({"process_id": process_id, "registered_domain": registered_domain})
+        if not target:
+            raise ValueError(f"Domain '{registered_domain}' was not found in this process")
+        controls = target.get("node_controls") or self._node_controls()
         control = controls.setdefault(node, self._node_control())
         timestamp = _now()
         control["enabled"] = enabled
         control["stopped"] = not enabled
         control["stop_reason"] = None if enabled else reason or "Stopped by admin"
         control["stopped_at"] = None if enabled else timestamp
-        target["updated_at"] = timestamp
-        await self._processes.update_one(
-            {"process_id": process_id},
-            {"$set": {"process_domains": process_domains, "updated_at": timestamp}},
+        await self._process_domain_refs.update_one(
+            {"process_id": process_id, "registered_domain": registered_domain},
+            {"$set": {"node_controls": controls, "updated_at": timestamp}},
         )
+        await self._processes.update_one({"process_id": process_id}, {"$set": {"updated_at": timestamp}})
         return {
             "process_id": process_id,
             "registered_domain": registered_domain,
@@ -472,16 +508,38 @@ class ProcessUploadService:
         raise ValueError(f"Domain '{registered_domain}' was not found in this process")
 
     async def _ensure_process_schema(self, process: dict[str, Any]) -> dict[str, Any]:
-        if int(process.get("schema_version") or 1) >= PROCESS_SCHEMA_VERSION and process.get("process_domains"):
-            return process
+        ref_count = await self._process_domain_refs.count_documents({"process_id": process["process_id"]})
+        if ref_count == 0:
+            refs = process.get("process_domains") or self._process_domains_from_legacy(process)
+            await self._upsert_process_domain_refs(
+                process["process_id"],
+                self._refs_from_process_domains(refs),
+                process.get("created_at") or _now(),
+            )
         updates = {
             "schema_version": PROCESS_SCHEMA_VERSION,
             "process_config": process.get("process_config") or self._process_config(int(process.get("agent_count") or 1)),
-            "process_domains": process.get("process_domains") or self._process_domains_from_legacy(process),
+            "domains": self._empty_domain_state(),
             "updated_at": _now(),
         }
-        await self._processes.update_one({"process_id": process["process_id"]}, {"$set": updates})
+        if int(process.get("schema_version") or 1) >= PROCESS_SCHEMA_VERSION and not process.get("process_domains") and not any((process.get("domains") or {}).values()):
+            return process
+        await self._processes.update_one(
+            {"process_id": process["process_id"]},
+            {"$set": updates, "$unset": {"process_domains": ""}},
+        )
         return {**process, **updates}
+
+    def _refs_from_process_domains(self, process_domains: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "domain": item.get("domain"),
+                "registered_domain": item.get("registered_domain"),
+                "career_url": item.get("career_url") or item.get("supplied_career_url"),
+            }
+            for item in process_domains
+            if item.get("registered_domain")
+        ]
 
     async def _load_process(self, process_id: str) -> dict[str, Any]:
         process = await self._processes.find_one({"process_id": process_id})
@@ -490,9 +548,10 @@ class ProcessUploadService:
         return process
 
     async def _load_related_domain_tasks(self, process: dict[str, Any]) -> list[dict[str, Any]]:
-        registered_domains = self._process_registered_domains(process)
+        registered_domains = await self._process_registered_domains(process)
         if not registered_domains:
             return []
+        process_refs = await self._process_refs_by_domain(process["process_id"], registered_domains)
         legacy_tasks = await self._documents_by_domain(self._domain_tasks, registered_domains)
         search_runs = await self._documents_by_domain(self._search_runs, registered_domains)
         category_runs = await self._documents_by_domain(self._category_runs, registered_domains)
@@ -502,6 +561,7 @@ class ProcessUploadService:
         tasks = [
             self._serialize_domain_task(
                 registered_domain,
+                process_refs.get(registered_domain, {}),
                 legacy_tasks.get(registered_domain, {}),
                 search_runs.get(registered_domain, {}),
                 category_runs.get(registered_domain, {}),
@@ -513,15 +573,21 @@ class ProcessUploadService:
         ]
         return sorted(tasks, key=lambda item: item["registered_domain"])
 
+    async def _process_refs_by_domain(self, process_id: str, registered_domains: list[str]) -> dict[str, dict[str, Any]]:
+        cursor = self._process_domain_refs.find({"process_id": process_id, "registered_domain": {"$in": registered_domains}})
+        rows = [document async for document in cursor]
+        return {str(document.get("registered_domain") or ""): document for document in rows if document.get("registered_domain")}
+
     async def _documents_by_domain(self, collection: Any, registered_domains: list[str]) -> dict[str, dict[str, Any]]:
         cursor = collection.find({"registered_domain": {"$in": registered_domains}})
         rows = [document async for document in cursor]
         return {str(document.get("registered_domain") or ""): document for document in rows if document.get("registered_domain")}
 
-    def _process_registered_domains(self, process: dict[str, Any]) -> list[str]:
-        process_domains = process.get("process_domains") or []
-        if process_domains:
-            return [item["registered_domain"] for item in process_domains if item.get("registered_domain")]
+    async def _process_registered_domains(self, process: dict[str, Any]) -> list[str]:
+        cursor = self._process_domain_refs.find({"process_id": process["process_id"]}, {"registered_domain": 1}).sort("created_at", ASCENDING)
+        refs = [document async for document in cursor]
+        if refs:
+            return [item["registered_domain"] for item in refs if item.get("registered_domain")]
         domains = process.get("domains", {})
         refs = []
         refs.extend(domains.get("queued", []))
@@ -533,6 +599,7 @@ class ProcessUploadService:
     def _serialize_domain_task(
         self,
         registered_domain: str,
+        process_ref: dict[str, Any],
         document: dict[str, Any],
         search_run: dict[str, Any],
         category_run: dict[str, Any],
@@ -545,10 +612,14 @@ class ProcessUploadService:
         pagination_result = pagination_run.get("result") if isinstance(pagination_run.get("result"), dict) else document.get("job_pagination_result")
         extraction_result = extraction_run.get("result") if isinstance(extraction_run.get("result"), dict) else document.get("job_extraction_result")
         return {
-            "domain": document.get("domain") or search_run.get("domain") or category_run.get("domain") or pattern_run.get("domain") or pagination_run.get("domain") or extraction_run.get("domain"),
+            "domain": process_ref.get("domain") or document.get("domain") or search_run.get("domain") or category_run.get("domain") or pattern_run.get("domain") or pagination_run.get("domain") or extraction_run.get("domain"),
             "registered_domain": registered_domain,
-            "career_url": document.get("career_url"),
-            "status": search_run.get("status") or document.get("status"),
+            "career_url": process_ref.get("career_url") or document.get("career_url"),
+            "process_status": process_ref.get("status"),
+            "enabled": process_ref.get("enabled", True),
+            "node_controls": process_ref.get("node_controls") or {},
+            "stop_reason": process_ref.get("stop_reason"),
+            "status": search_run.get("status") or document.get("status") or process_ref.get("status"),
             "attempts": search_run.get("attempts", document.get("attempts", 0)),
             "last_started_at": search_run.get("last_started_at") or document.get("last_started_at"),
             "last_completed_at": search_run.get("last_completed_at") or document.get("last_completed_at"),

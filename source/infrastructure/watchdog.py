@@ -131,10 +131,7 @@ def _enqueue_category_task(task: dict[str, Any]) -> None:
 
 
 def _process_id_for_category_domain(registered_domain: str) -> str | None:
-    process = _process_collection().find_one(
-        {"domains.completed.registered_domain": registered_domain},
-        {"process_id": 1},
-    )
+    process = _process_ref_collection().find_one({"registered_domain": registered_domain, "status": "completed"}, {"process_id": 1})
     return str((process or {}).get("process_id") or "") or None
 
 
@@ -208,41 +205,40 @@ def _enqueue_job_pattern_task(task: dict[str, Any]) -> None:
 
 
 def _process_id_for_job_pattern_domain(registered_domain: str) -> str | None:
-    process = _process_collection().find_one(
-        {
-            "job_pattern_status": "running",
-            "domains.completed.registered_domain": registered_domain,
-        },
-        {"process_id": 1},
-    )
+    process = _running_process_for_domain(registered_domain, "job_pattern_status")
     return str((process or {}).get("process_id") or "") or None
 
 
 def _process_id_for_job_pagination_domain(registered_domain: str) -> str | None:
-    process = _process_collection().find_one(
-        {
-            "job_pagination_status": "running",
-            "domains.completed.registered_domain": registered_domain,
-        },
-        {"process_id": 1},
-    )
+    process = _running_process_for_domain(registered_domain, "job_pagination_status")
     return str((process or {}).get("process_id") or "") or None
 
 
 def _process_id_for_job_extraction_domain(registered_domain: str) -> str | None:
-    process = _process_collection().find_one(
-        {
-            "job_extraction_status": "running",
-            "domains.completed.registered_domain": registered_domain,
-        },
-        {"process_id": 1},
-    )
+    process = _running_process_for_domain(registered_domain, "job_extraction_status")
     return str((process or {}).get("process_id") or "") or None
+
+
+def _running_process_for_domain(registered_domain: str, status_field: str) -> dict[str, Any] | None:
+    refs = _process_ref_collection().find({"registered_domain": registered_domain, "status": "completed"}, {"process_id": 1})
+    for ref in refs:
+        process_id = str((ref or {}).get("process_id") or "")
+        if not process_id:
+            continue
+        process = _process_collection().find_one({"process_id": process_id, status_field: "running"}, {"process_id": 1})
+        if process:
+            return process
+    return None
 
 
 def _process_collection():
     mongodb = get_sync_mongodb_service()
     return mongodb.collection(settings.mongodb_process_uploads_collection)
+
+
+def _process_ref_collection():
+    mongodb = get_sync_mongodb_service()
+    return mongodb.collection(settings.mongodb_process_domain_refs_collection)
 
 
 if __name__ == "__main__":

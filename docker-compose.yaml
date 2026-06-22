@@ -10,6 +10,7 @@ services:
       MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
       MONGODB_CLIENTS_COLLECTION: clients
       MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
+      MONGODB_PROCESS_DOMAIN_REFS_COLLECTION: process_domain_refs
       MONGODB_PROCESS_DOMAIN_TASKS_COLLECTION: process_domain_tasks
       MONGODB_SEARCH_RUNS_COLLECTION: search_runs
       MONGODB_CAREER_CATEGORY_RUNS_COLLECTION: career_category_runs
@@ -65,6 +66,7 @@ services:
       MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
       MONGODB_CLIENTS_COLLECTION: clients
       MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
+      MONGODB_PROCESS_DOMAIN_REFS_COLLECTION: process_domain_refs
       MONGODB_PROCESS_DOMAIN_TASKS_COLLECTION: process_domain_tasks
       MONGODB_SEARCH_RUNS_COLLECTION: search_runs
       MONGODB_CAREER_CATEGORY_RUNS_COLLECTION: career_category_runs
@@ -114,6 +116,7 @@ services:
       MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
       MONGODB_CLIENTS_COLLECTION: clients
       MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
+      MONGODB_PROCESS_DOMAIN_REFS_COLLECTION: process_domain_refs
       MONGODB_PROCESS_DOMAIN_TASKS_COLLECTION: process_domain_tasks
       MONGODB_SEARCH_RUNS_COLLECTION: search_runs
       MONGODB_CAREER_CATEGORY_RUNS_COLLECTION: career_category_runs
@@ -165,6 +168,7 @@ services:
       MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-admin}:${MONGO_ROOT_PASSWORD:-secret}@mongo:27017
       MONGODB_DATABASE: ${MONGODB_DATABASE:-job_monitoring_agent}
       MONGODB_PROCESS_UPLOADS_COLLECTION: process_uploads
+      MONGODB_PROCESS_DOMAIN_REFS_COLLECTION: process_domain_refs
       MONGODB_PROCESS_DOMAIN_TASKS_COLLECTION: process_domain_tasks
       MONGODB_SEARCH_RUNS_COLLECTION: search_runs
       MONGODB_CAREER_CATEGORY_RUNS_COLLECTION: career_category_runs

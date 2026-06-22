@@ -219,3 +219,4 @@ mongo-data/
 source/.env
 redis-data/
 infra
+/main.py

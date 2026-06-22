@@ -49,6 +49,10 @@ class Settings:
     mongodb_database: str = os.getenv("MONGODB_DATABASE", "job_monitoring_agent")
     mongodb_clients_collection: str = os.getenv("MONGODB_CLIENTS_COLLECTION", "clients")
     mongodb_process_uploads_collection: str = os.getenv("MONGODB_PROCESS_UPLOADS_COLLECTION", "process_uploads")
+    mongodb_process_domain_refs_collection: str = os.getenv(
+        "MONGODB_PROCESS_DOMAIN_REFS_COLLECTION",
+        "process_domain_refs",
+    )
     mongodb_process_domain_tasks_collection: str = os.getenv(
         "MONGODB_PROCESS_DOMAIN_TASKS_COLLECTION",
         "process_domain_tasks",
