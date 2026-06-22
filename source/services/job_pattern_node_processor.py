@@ -13,6 +13,7 @@ from services.grid_session import (
     create_session_async,
 )
 from services.job_listing_pattern_store import next_pattern_version, pattern_signature
+from services.job_pattern_node_service import get_job_pattern_node_service
 from services.job_pattern.job_main import main as generate_job_listing_pattern
 from services.navigation import navigate_to_url
 from services.openai_service import reset_openai_runtime_config, set_openai_runtime_config
@@ -89,12 +90,16 @@ class JobPatternNodeProcessor:
         browser_session = None
         with SeleniumSessionHeartbeat(slot["slot_id"]):
             try:
+                self._progress(task, "pattern_creating_selenium_session")
                 session = await self._create_selenium_session(slot)
                 self._attach_session(slot, session.session_id)
                 self._heartbeat(slot)
+                self._progress(task, "pattern_attaching_browser")
                 browser_session = await self._attach_browser(session.cdp_url)
                 self._heartbeat(slot)
+                self._progress(task, "pattern_generating_patterns")
                 patterns = await self._generate_patterns(task, browser_session, slot)
+                self._progress(task, "pattern_completed")
                 return self._result(task, patterns, time.monotonic() - started)
             finally:
                 await close_browser_attachment(browser_session)
@@ -117,13 +122,28 @@ class JobPatternNodeProcessor:
 
     async def _generate_patterns(self, task: dict[str, Any], browser_session: Any, slot: dict[str, Any]) -> list[dict[str, Any]]:
         results = []
-        for candidate in task.get("input", {}).get("job_listing_patterns") or []:
-            results.append(await self._generate_pattern(candidate, browser_session, slot))
+        for index, candidate in enumerate(task.get("input", {}).get("job_listing_patterns") or [], start=1):
+            results.append(await self._generate_pattern(task, candidate, browser_session, slot, index))
         return results
 
-    async def _generate_pattern(self, candidate: dict[str, Any], browser_session: Any, slot: dict[str, Any]) -> dict[str, Any]:
+    async def _bounded_step(self, step: str, operation):
+        timeout_seconds = max(30, int(self._settings.node_step_timeout_seconds))
+        try:
+            return await asyncio.wait_for(operation, timeout=timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(f"{step} timed out after {timeout_seconds} seconds") from exc
+
+    async def _generate_pattern(
+        self,
+        task: dict[str, Any],
+        candidate: dict[str, Any],
+        browser_session: Any,
+        slot: dict[str, Any],
+        index: int,
+    ) -> dict[str, Any]:
         page_url = str(candidate.get("page_url") or "").strip()
         self._log_started(page_url)
+        self._progress(task, "pattern_navigating_listing_page", page_url, index)
         navigation = await navigate_to_url(
             browser_session.page,
             agent_index=int(slot.get("session_index") or 0),
@@ -134,14 +154,28 @@ class JobPatternNodeProcessor:
         self._heartbeat(slot)
         if navigation.get("status") != "navigated":
             return {**candidate, "status": "pattern_generation_failed", "last_error": navigation.get("error") or navigation.get("status"), "generated_at": _now_iso()}
-        pattern_result = await generate_job_listing_pattern(
-            browser_session.page,
-            url=page_url,
-            example_jobs=candidate.get("example_jobs") or [],
-            seed_failed_pattern=self._seed_failed_pattern(candidate),
-            seed_extracted_jobs=candidate.get("jobs") or candidate.get("example_jobs") or [],
-            seed_validation=candidate.get("validation") or None,
-        )
+        self._progress(task, "pattern_running_llm_generation", page_url, index)
+        try:
+            pattern_result = await self._bounded_step(
+                "pattern_llm_generation",
+                generate_job_listing_pattern(
+                    browser_session.page,
+                    url=page_url,
+                    example_jobs=candidate.get("example_jobs") or [],
+                    seed_failed_pattern=self._seed_failed_pattern(candidate),
+                    seed_extracted_jobs=candidate.get("jobs") or candidate.get("example_jobs") or [],
+                    seed_validation=candidate.get("validation") or None,
+                ),
+            )
+        except TimeoutError as exc:
+            self._heartbeat(slot)
+            return {
+                **candidate,
+                "status": "pattern_generation_failed",
+                "last_error": str(exc),
+                "generated_at": _now_iso(),
+                "last_validated_at": _now_iso(),
+            }
         self._heartbeat(slot)
         status = pattern_result.get("status")
         validation = pattern_result.get("validation") or {}
@@ -204,6 +238,20 @@ class JobPatternNodeProcessor:
 
     def _heartbeat(self, slot: dict[str, Any]) -> None:
         get_selenium_session_slot_service().heartbeat_slot(slot["slot_id"])
+
+    def _progress(
+        self,
+        task: dict[str, Any],
+        step: str,
+        current_url: str | None = None,
+        page_index: int | None = None,
+    ) -> None:
+        get_job_pattern_node_service().update_task_progress(
+            task["registered_domain"],
+            step=step,
+            current_url=current_url,
+            page_index=page_index,
+        )
 
     def _log_started(self, page_url: str) -> None:
         log_event(logger, "info", "job_pattern_generation_started", domain="job_pattern", page_url=page_url)

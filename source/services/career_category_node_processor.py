@@ -14,6 +14,7 @@ from services.grid_session import (
     create_session_async,
 )
 from services.openai_service import reset_openai_runtime_config, set_openai_runtime_config
+from services.career_process_service import get_career_process_service
 from services.selenium_session_heartbeat import SeleniumSessionHeartbeat
 from services.selenium_session_slot_service import get_selenium_session_slot_service
 from services.sync_mongodb_service import SyncMongoDBService, get_sync_mongodb_service
@@ -93,15 +94,19 @@ class CareerCategoryNodeProcessor:
         with SeleniumSessionHeartbeat(slot["slot_id"]):
             try:
                 self._log_session_create_started(task, slot)
+                self._progress(task, "category_creating_selenium_session")
                 session = await self._create_selenium_session(slot)
                 self._attach_session(slot, session.session_id)
                 self._log_session_created(task, slot, session.session_id)
                 self._heartbeat(slot)
+                self._progress(task, "category_attaching_browser")
                 browser_session = await self._attach_browser(session.cdp_url)
                 self._log_browser_attached(task, session.session_id)
                 self._heartbeat(slot)
+                self._progress(task, "category_running")
                 node_result = await self._run_category_node(task, browser_session, slot)
                 self._heartbeat(slot)
+                self._progress(task, "category_completed")
                 return self._result(task, slot, node_result, time.monotonic() - started)
             finally:
                 await close_browser_attachment(browser_session)
@@ -131,6 +136,12 @@ class CareerCategoryNodeProcessor:
             agent_index=int(slot.get("session_index") or 0),
             agent_tab={"handle": None},
             heartbeat=lambda: self._heartbeat(slot),
+            progress=lambda step, current_url=None, page_index=None: self._progress(
+                task,
+                step,
+                current_url,
+                page_index,
+            ),
         )
 
     async def _close_selenium_session(self, slot: dict[str, Any], session: Any) -> None:
@@ -216,3 +227,17 @@ class CareerCategoryNodeProcessor:
 
     def _heartbeat(self, slot: dict[str, Any]) -> None:
         get_selenium_session_slot_service().heartbeat_slot(slot["slot_id"])
+
+    def _progress(
+        self,
+        task: dict[str, Any],
+        step: str,
+        current_url: str | None = None,
+        page_index: int | None = None,
+    ) -> None:
+        get_career_process_service().update_task_progress(
+            task["registered_domain"],
+            step=step,
+            current_url=current_url,
+            page_index=page_index,
+        )

@@ -473,6 +473,29 @@ class JobPatternNodeService:
             },
         )
 
+    def update_task_progress(
+        self,
+        registered_domain: str,
+        *,
+        step: str,
+        current_url: str | None = None,
+        page_index: int | None = None,
+    ) -> None:
+        timestamp = _now()
+        fields: dict[str, Any] = {
+            "current_step": step,
+            "last_step_at": timestamp,
+            "updated_at": timestamp,
+        }
+        if current_url:
+            fields["current_url"] = current_url
+        if page_index is not None:
+            fields["current_page_index"] = page_index
+        self._pattern_runs.update_one(
+            {"job_pattern_run_key": self._pattern_run_key(registered_domain), "status": "running"},
+            {"$set": fields},
+        )
+
     def mark_process_task_running(self, process_id: str) -> None:
         self._processes.update_one(
             {"process_id": process_id, "job_pattern_totals.queued": {"$gt": 0}},
@@ -512,7 +535,16 @@ class JobPatternNodeService:
 
     def _completion_unset_fields(self, status: str, *, mirror: bool = True) -> dict[str, str]:
         if not mirror:
-            fields = {"worker_name": "", "celery_task_id": "", "heartbeat_at": "", "lease_expires_at": ""}
+            fields = {
+                "worker_name": "",
+                "celery_task_id": "",
+                "heartbeat_at": "",
+                "lease_expires_at": "",
+                "current_step": "",
+                "current_url": "",
+                "current_page_index": "",
+                "last_step_at": "",
+            }
             if status == "completed":
                 fields["last_error"] = ""
                 fields["last_failure_type"] = ""
@@ -551,7 +583,16 @@ class JobPatternNodeService:
                     "updated_at": timestamp,
                 },
                 "$setOnInsert": {"created_at": timestamp, "attempts": 0, "run_count": 0},
-                "$unset": {"worker_name": "", "celery_task_id": ""},
+                "$unset": {
+                    "worker_name": "",
+                    "celery_task_id": "",
+                    "heartbeat_at": "",
+                    "lease_expires_at": "",
+                    "current_step": "",
+                    "current_url": "",
+                    "current_page_index": "",
+                    "last_step_at": "",
+                },
             },
             upsert=True,
         )
@@ -570,7 +611,17 @@ class JobPatternNodeService:
                 "last_error_details": error_details,
                 "updated_at": timestamp,
             },
-            "$unset": {"worker_name": "", "celery_task_id": "", "heartbeat_at": "", "lease_expires_at": "", "dispatched_at": ""},
+            "$unset": {
+                "worker_name": "",
+                "celery_task_id": "",
+                "heartbeat_at": "",
+                "lease_expires_at": "",
+                "dispatched_at": "",
+                "current_step": "",
+                "current_url": "",
+                "current_page_index": "",
+                "last_step_at": "",
+            },
         }
         if decrement_attempt:
             update["$inc"] = {"attempts": -1}

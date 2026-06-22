@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, List
 
 from prompts.career_category_prompt import create_job_page_analysis_prompt
+from core.config import get_settings
 from services.flow_safety import is_email_navigation_url, normalize_navigation_url, _is_external_domain, has_skip_extension, detect_blocked_platform
 from services.openai_service import OpenAIAnalysisService
 from urllib.parse import  urlparse
@@ -270,22 +271,55 @@ def _send_heartbeat(heartbeat: Callable[[], None] | None) -> None:
         )
 
 
+def _send_progress(
+    progress: Callable[[str, str | None, int | None], None] | None,
+    step: str,
+    current_url: str | None = None,
+    page_index: int | None = None,
+) -> None:
+    if progress is None:
+        return
+    try:
+        progress(step, current_url, page_index)
+    except Exception:
+        log_event(
+            logger,
+            "warning",
+            "career_category_progress_failed",
+            domain="career_category",
+            step=step,
+            current_url=current_url,
+            page_index=page_index,
+            exc_info=True,
+        )
+
+
+async def _bounded_step(step: str, operation):
+    timeout_seconds = max(30, int(get_settings().node_step_timeout_seconds))
+    try:
+        return await asyncio.wait_for(operation, timeout=timeout_seconds)
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(f"{step} timed out after {timeout_seconds} seconds") from exc
+
+
 async def career_page_category_node(
     career_page_url: List[str],
     browser_session: Any,
     agent_index: int,
     agent_tab: dict,
     heartbeat: Callable[[], None] | None = None,
+    progress: Callable[[str, str | None, int | None], None] | None = None,
 ) -> dict:
     career_pages_analysis = []
     visited_urls: list[str] = []
     _send_heartbeat(heartbeat)
 
-    for career_url in career_page_url:
+    for page_index, career_url in enumerate(career_page_url, start=1):
         if career_url in visited_urls:
             continue
         visited_urls.append(career_url)
         _send_heartbeat(heartbeat)
+        _send_progress(progress, "category_navigating_career_url", career_url, page_index)
 
         nav_response = await navigate_to_url(
             browser_session.page if browser_session is not None else None,
@@ -326,10 +360,17 @@ async def career_page_category_node(
 
         while True:
             # ── Extract page content ──────────────────────────────────────────
-            extracted_content_response = await extract_page_content(
-                browser_session.page if browser_session is not None else None,
-                sections=["body"],
-            )
+            _send_progress(progress, "category_extracting_page_content", career_url, page_index)
+            try:
+                extracted_content_response = await _bounded_step(
+                    "category_extract_page_content",
+                    extract_page_content(
+                        browser_session.page if browser_session is not None else None,
+                        sections=["body"],
+                    ),
+                )
+            except TimeoutError as exc:
+                extracted_content_response = {"markdown": "", "error": str(exc)}
             _send_heartbeat(heartbeat)
 
             if extracted_content_response is None or not extracted_content_response.get("markdown"):
@@ -378,13 +419,22 @@ async def career_page_category_node(
             interactive_targets = _extract_interactive_targets(extracted_content_response)
 
             # ── LLM analysis ──────────────────────────────────────────────────
+            _send_progress(progress, "category_running_llm_analysis", extracted_content_response.get("url") or career_url, page_index)
             prompt = create_job_page_analysis_prompt(
                 career_url,
                 extracted_content_response["markdown"],
                 interactive_links=_format_interactive_targets(interactive_targets),
             )
             service = OpenAIAnalysisService()
-            analysis = await service.analyze_data(prompt=prompt, json_response=True)
+            try:
+                analysis = await _bounded_step(
+                    "category_llm_analysis",
+                    service.analyze_data(prompt=prompt, json_response=True),
+                )
+            except TimeoutError as exc:
+                navigation_result["status"] = "ai_analysis_timeout"
+                navigation_result["error"] = str(exc)
+                break
             _send_heartbeat(heartbeat)
 
             if not analysis.success:
@@ -481,6 +531,7 @@ async def career_page_category_node(
                     visited_urls.append(target_url)
                     navigation_steps += 1
 
+                    _send_progress(progress, "category_following_navigation_url", target_url, page_index)
                     follow_status, landed_url, follow_error = await follow_navigation_target(
                         browser_session.page if browser_session is not None else None,
                         target_url,
@@ -574,6 +625,7 @@ async def career_page_category_node(
                     visited_urls.append(target_url)
                     navigation_steps += 1
 
+                    _send_progress(progress, "category_following_external_url", target_url, page_index)
                     follow_status, landed_url, follow_error = await follow_navigation_target(
                         browser_session.page if browser_session is not None else None,
                         target_url,
@@ -602,6 +654,7 @@ async def career_page_category_node(
                     visited_urls.append(target_url)
                     navigation_steps += 1
 
+                    _send_progress(progress, "category_following_navigation_url", target_url, page_index)
                     follow_status, landed_url, follow_error = await follow_navigation_target(
                         browser_session.page if browser_session is not None else None,
                         target_url,
@@ -636,6 +689,7 @@ async def career_page_category_node(
                     visited_buttons.add(target_button)
                     navigation_steps += 1
 
+                    _send_progress(progress, "category_following_navigation_button", career_url, page_index)
                     follow_status, landed_url, follow_error = await follow_navigation_target(
                         browser_session.page if browser_session is not None else None,
                         None,

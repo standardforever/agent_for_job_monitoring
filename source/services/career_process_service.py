@@ -265,6 +265,29 @@ class CareerProcessService:
             },
         )
 
+    def update_task_progress(
+        self,
+        registered_domain: str,
+        *,
+        step: str,
+        current_url: str | None = None,
+        page_index: int | None = None,
+    ) -> None:
+        timestamp = _now()
+        fields: dict[str, Any] = {
+            "current_step": step,
+            "last_step_at": timestamp,
+            "updated_at": timestamp,
+        }
+        if current_url:
+            fields["current_url"] = current_url
+        if page_index is not None:
+            fields["current_page_index"] = page_index
+        self._category_runs.update_one(
+            {"category_run_key": self._category_run_key(registered_domain), "status": "running"},
+            {"$set": fields},
+        )
+
     def complete_task(self, registered_domain: str, result: dict[str, Any], process_id: str | None = None) -> None:
         timestamp = _now()
         previous_state = self._previous_category_state(registered_domain)
@@ -289,6 +312,10 @@ class CareerProcessService:
                     "celery_task_id": "",
                     "heartbeat_at": "",
                     "lease_expires_at": "",
+                    "current_step": "",
+                    "current_url": "",
+                    "current_page_index": "",
+                    "last_step_at": "",
                     "last_error": "",
                     "last_error_details": "",
                 },
@@ -390,6 +417,12 @@ class CareerProcessService:
                 "$unset": {
                     "worker_name": "",
                     "celery_task_id": "",
+                    "heartbeat_at": "",
+                    "lease_expires_at": "",
+                    "current_step": "",
+                    "current_url": "",
+                    "current_page_index": "",
+                    "last_step_at": "",
                 },
             },
             upsert=True,
@@ -412,6 +445,10 @@ class CareerProcessService:
                 "celery_task_id": "",
                 "heartbeat_at": "",
                 "lease_expires_at": "",
+                "current_step": "",
+                "current_url": "",
+                "current_page_index": "",
+                "last_step_at": "",
             },
         }
         if decrement_attempt:
