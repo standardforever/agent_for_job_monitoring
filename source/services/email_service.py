@@ -69,11 +69,11 @@ ROLES_CSV_FIELDS = [
 ]
 
 ALERT_JOBS_CSV_FIELDS = [
-    "registered_domain",
-    "title",
-    "job_url",
-    "source_url",
-    "first_seen_at",
+    "Company",
+    "Job Title",
+    "Date Detected",
+    "Apply URL",
+    "Source URL",
 ]
 
 
@@ -102,6 +102,17 @@ def _flatten_csv_list(values: Any) -> str:
         elif item is not None:
             flattened.append(str(item))
     return " | ".join(value for value in flattened if value)
+
+
+def _format_report_datetime(value: Any) -> str:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        return raw_value
+    return parsed.strftime("%d %b %Y  %H:%M")
 
 
 def _build_career_outcome_reason_with_pagination(career_overview: dict[str, Any]) -> str | None:
@@ -405,11 +416,11 @@ def build_alert_jobs_csv_attachment(alert: dict[str, Any]) -> EmailAttachment:
     period_type = str(alert.get("period_type") or "daily").strip() or "daily"
     rows = [
         {
-            "registered_domain": job.get("registered_domain"),
-            "title": job.get("title"),
-            "job_url": job.get("job_url"),
-            "source_url": job.get("source_url"),
-            "first_seen_at": job.get("first_seen_at"),
+            "Company": job.get("registered_domain"),
+            "Job Title": job.get("title"),
+            "Date Detected": _format_report_datetime(job.get("first_seen_at")),
+            "Apply URL": job.get("job_url"),
+            "Source URL": job.get("source_url"),
         }
         for job in list(alert.get("jobs_after_filter") or [])
     ]
