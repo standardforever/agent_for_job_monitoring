@@ -38,6 +38,7 @@ async def execute_infinite_scroll(
         no_growth_limit=no_growth_limit,
     )
     for round_index in range(1, max_rounds + 1):
+        context.set_progress("pagination_infinite_scroll_round", page.url, round_index)
         before_url = page.url
         before_total_jobs = len(context.jobs)
         probe = await gradual_scroll_probe_for_more_content(page)

@@ -351,6 +351,10 @@ class JobPaginationNodeService:
                         "celery_task_id": "",
                         "heartbeat_at": "",
                         "lease_expires_at": "",
+                        "current_step": "",
+                        "current_url": "",
+                        "current_page_index": "",
+                        "last_step_at": "",
                     },
                 },
                 upsert=True,
@@ -527,7 +531,16 @@ class JobPaginationNodeService:
 
     def _completion_unset_fields(self, status: str, *, mirror: bool = True) -> dict[str, str]:
         if not mirror:
-            fields = {"worker_name": "", "celery_task_id": "", "heartbeat_at": "", "lease_expires_at": ""}
+            fields = {
+                "worker_name": "",
+                "celery_task_id": "",
+                "heartbeat_at": "",
+                "lease_expires_at": "",
+                "current_step": "",
+                "current_url": "",
+                "current_page_index": "",
+                "last_step_at": "",
+            }
             if status == "completed":
                 fields["last_error"] = ""
                 fields["last_failure_type"] = ""
@@ -566,7 +579,16 @@ class JobPaginationNodeService:
                     "updated_at": timestamp,
                 },
                 "$setOnInsert": {"created_at": timestamp, "attempts": 0, "run_count": 0},
-                "$unset": {"worker_name": "", "celery_task_id": ""},
+                "$unset": {
+                    "worker_name": "",
+                    "celery_task_id": "",
+                    "heartbeat_at": "",
+                    "lease_expires_at": "",
+                    "current_step": "",
+                    "current_url": "",
+                    "current_page_index": "",
+                    "last_step_at": "",
+                },
             },
             upsert=True,
         )
@@ -585,7 +607,17 @@ class JobPaginationNodeService:
                 "last_error_details": error_details,
                 "updated_at": timestamp,
             },
-            "$unset": {"worker_name": "", "celery_task_id": "", "heartbeat_at": "", "lease_expires_at": "", "dispatched_at": ""},
+            "$unset": {
+                "worker_name": "",
+                "celery_task_id": "",
+                "heartbeat_at": "",
+                "lease_expires_at": "",
+                "dispatched_at": "",
+                "current_step": "",
+                "current_url": "",
+                "current_page_index": "",
+                "last_step_at": "",
+            },
         }
         if decrement_attempt:
             update["$inc"] = {"attempts": -1}
@@ -644,7 +676,17 @@ class JobPaginationNodeService:
                     "last_error_details": error_details,
                     "updated_at": timestamp,
                 },
-                "$unset": {"worker_name": "", "celery_task_id": "", "heartbeat_at": "", "lease_expires_at": "", "dispatched_at": ""},
+                "$unset": {
+                    "worker_name": "",
+                    "celery_task_id": "",
+                    "heartbeat_at": "",
+                    "lease_expires_at": "",
+                    "dispatched_at": "",
+                    "current_step": "",
+                    "current_url": "",
+                    "current_page_index": "",
+                    "last_step_at": "",
+                },
             },
         )
         if result.modified_count:

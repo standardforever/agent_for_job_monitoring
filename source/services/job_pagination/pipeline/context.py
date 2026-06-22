@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass(slots=True)
@@ -29,9 +29,15 @@ class PipelineContext:
     decisions: list[dict[str, Any]] = field(default_factory=list)
     artifacts: dict[str, Any] = field(default_factory=dict)
     stop_reason: str = "not_started"
+    progress: Callable[[str, str | None, int | None], None] | None = None
 
     def add_stage(self, result: StageResult) -> None:
         self.stages.append(result)
+
+    def set_progress(self, step: str, current_url: str | None = None, page_index: int | None = None) -> None:
+        if self.progress is None:
+            return
+        self.progress(step, current_url, page_index)
 
     def add_error(self, stage: str, detail: str, **extra: Any) -> None:
         self.navigation_errors.append({"stage": stage, "detail": detail, **extra})

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -24,6 +25,42 @@ def _send_heartbeat(heartbeat: Callable[[], None] | None) -> None:
             domain="url_extraction",
             exc_info=True,
         )
+
+
+def _send_progress(
+    progress: Callable[[str, str | None], None] | None,
+    step: str,
+    current_url: str | None = None,
+) -> None:
+    if progress is None:
+        return
+    try:
+        progress(step, current_url)
+    except Exception:
+        log_event(
+            logger,
+            "warning",
+            "url_extraction_progress_update_failed",
+            domain="url_extraction",
+            step=step,
+            current_url=current_url,
+            exc_info=True,
+        )
+
+
+async def _run_step(
+    step: str,
+    operation,
+    *,
+    progress: Callable[[str, str | None], None] | None,
+    current_url: str | None,
+    timeout_seconds: int,
+):
+    _send_progress(progress, step, current_url)
+    try:
+        return await asyncio.wait_for(operation, timeout=max(30, timeout_seconds))
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(f"{step} timed out after {max(30, timeout_seconds)} seconds") from exc
 
 
 def _dedupe_urls(values: list[str]) -> list[str]:
@@ -91,6 +128,8 @@ async def career_url_extraction_node(
     *,
     registered_domain: str | None = None,
     heartbeat: Callable[[], None] | None = None,
+    progress: Callable[[str, str | None], None] | None = None,
+    step_timeout_seconds: int = 240,
 ) -> dict:
     log_event(
         logger,
@@ -113,12 +152,23 @@ async def career_url_extraction_node(
     _send_heartbeat(heartbeat)
 
     # Try without www first, then fall back to with www
-    fallback_urls = await extractor.discover_job_urls_from_domain(
-        domain=url_no_www,
-        try_common_paths=False,
-        extract_from_homepage=True,
-        filter_domain=registered_domain,
-    )
+    try:
+        fallback_urls = await _run_step(
+            "homepage_discovery_without_www",
+            extractor.discover_job_urls_from_domain(
+                domain=url_no_www,
+                try_common_paths=False,
+                extract_from_homepage=True,
+                filter_domain=registered_domain,
+            ),
+            progress=progress,
+            current_url=url_no_www,
+            timeout_seconds=step_timeout_seconds,
+        )
+    except TimeoutError as exc:
+        return_dict["status"] = "domain_step_timeout"
+        return_dict["error_message"] = str(exc)
+        return return_dict
     _send_heartbeat(heartbeat)
 
     active_url = url_no_www
@@ -131,12 +181,23 @@ async def career_url_extraction_node(
             domain=url_no_www,
             input_url=url_no_www,
         )
-        fallback_urls = await extractor.discover_job_urls_from_domain(
-            domain=url_with_www,
-            try_common_paths=False,
-            extract_from_homepage=True,
-            filter_domain=registered_domain,
-        )
+        try:
+            fallback_urls = await _run_step(
+                "homepage_discovery_with_www",
+                extractor.discover_job_urls_from_domain(
+                    domain=url_with_www,
+                    try_common_paths=False,
+                    extract_from_homepage=True,
+                    filter_domain=registered_domain,
+                ),
+                progress=progress,
+                current_url=url_with_www,
+                timeout_seconds=step_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            return_dict["status"] = "domain_step_timeout"
+            return_dict["error_message"] = str(exc)
+            return return_dict
         active_url = url_with_www
         _send_heartbeat(heartbeat)
     
@@ -185,11 +246,33 @@ async def career_url_extraction_node(
         return return_dict
 
     
-    non_domain_careers_result = await extractor._extract_career_urls_from_page(active_url)
+    try:
+        non_domain_careers_result = await _run_step(
+            "external_career_url_extraction",
+            extractor._extract_career_urls_from_page(active_url),
+            progress=progress,
+            current_url=active_url,
+            timeout_seconds=step_timeout_seconds,
+        )
+    except TimeoutError as exc:
+        return_dict["status"] = "domain_step_timeout"
+        return_dict["error_message"] = str(exc)
+        return return_dict
     _send_heartbeat(heartbeat)
     search_domain = _search_domain_text(registered_domain or navigate_to)
     search_query = f"{search_domain} jobs careers vacancies openings"
-    search_result = await extractor.search_duckduckgo(search_query, registered_domain or navigate_to)
+    try:
+        search_result = await _run_step(
+            "search_engine_discovery",
+            extractor.search_duckduckgo(search_query, registered_domain or navigate_to),
+            progress=progress,
+            current_url=search_domain,
+            timeout_seconds=step_timeout_seconds,
+        )
+    except TimeoutError as exc:
+        return_dict["status"] = "domain_step_timeout"
+        return_dict["error_message"] = str(exc)
+        return return_dict
     _send_heartbeat(heartbeat)
     return_dict["diagnostics"]["search_query"] = search_query
     return_dict["diagnostics"]["homepage_status"] = fallback_urls.get("status")

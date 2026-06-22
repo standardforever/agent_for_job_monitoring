@@ -41,6 +41,7 @@ class Settings:
     stale_task_seconds: int = int(os.getenv("STALE_TASK_SECONDS", "300"))
     node_task_soft_time_limit_seconds: int = int(os.getenv("NODE_TASK_SOFT_TIME_LIMIT_SECONDS", "900"))
     node_task_hard_time_limit_seconds: int = int(os.getenv("NODE_TASK_HARD_TIME_LIMIT_SECONDS", "1200"))
+    node_step_timeout_seconds: int = int(os.getenv("NODE_STEP_TIMEOUT_SECONDS", "240"))
     task_max_attempts: int = int(os.getenv("TASK_MAX_ATTEMPTS", "3"))
     max_sessions_per_selenium: int = int(os.getenv("MAX_SESSIONS_PER_SELENIUM", "10"))
     client_registration_password: str = os.getenv("CLIENT_REGISTRATION_PASSWORD", "")

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
+import asyncio
 from playwright.async_api import async_playwright
+from core.config import get_settings
 from utils.logging import get_logger, log_event
 
 from ..extraction.extractor import JobExtractionContext
@@ -56,8 +58,9 @@ class PipelineOrchestrator:
         *,
         job_pattern: dict[str, Any] | None = None,
         pagination_plan: dict[str, Any] | None = None,
+        progress: Callable[[str, str | None, int | None], None] | None = None,
     ) -> dict[str, Any]:
-        context = PipelineContext(source_url=page_url)
+        context = PipelineContext(source_url=page_url, progress=progress)
         extraction = JobExtractionService(JobExtractionContext(job_pattern)) if job_pattern else self.extraction
         pagination_result: dict[str, Any] = {}
         run_dir = self.artifact_store.create_run_dir(page_url)
@@ -67,12 +70,16 @@ class PipelineOrchestrator:
         async with async_playwright() as pw:
             browser = None
             try:
+                context.set_progress("pagination_connecting_browser", page_url, 1)
                 browser = await pw.chromium.connect_over_cdp(cdp_url)
                 browser_context = browser.contexts[0] if browser.contexts else await browser.new_context()
                 page = await browser_context.new_page()
-                await self.page_loader.load(page, page_url, context)
-                await extraction.discover(page, context)
+                context.set_progress("pagination_loading_initial_page", page_url, 1)
+                await self._bounded_step("pagination_loading_initial_page", self.page_loader.load(page, page_url, context))
+                context.set_progress("pagination_extracting_initial_jobs", page.url, 1)
+                await self._bounded_step("pagination_extracting_initial_jobs", extraction.discover(page, context))
 
+                context.set_progress("pagination_trying_existing_plan", page.url, 1)
                 existing_execution = await self._try_existing_pagination_plan(
                     page,
                     page_url,
@@ -81,8 +88,10 @@ class PipelineOrchestrator:
                     pagination_plan or {},
                 )
                 if not self._existing_plan_finished(existing_execution):
+                    context.set_progress("pagination_discovering_strategy", page.url, 1)
                     pagination_result = await self._discover_and_execute_pagination(page, extraction.extractor, context)
 
+                context.set_progress("pagination_validating_result", page.url, None)
                 validation = self.validation.validate(context)
                 context.stop_reason = context.stop_reason if context.stop_reason != "not_started" else "completed"
             except Exception as exc:
@@ -107,6 +116,13 @@ class PipelineOrchestrator:
                     await browser.close()
 
         return _pipeline_result(context, pagination_result, validation)
+
+    async def _bounded_step(self, step: str, operation):
+        timeout_seconds = max(30, int(get_settings().node_step_timeout_seconds))
+        try:
+            return await asyncio.wait_for(operation, timeout=timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(f"{step} timed out after {timeout_seconds} seconds") from exc
 
     def _persist_artifacts(
         self,
@@ -260,12 +276,14 @@ async def run_pipeline(
     *,
     job_pattern: dict[str, Any] | None = None,
     pagination_plan: dict[str, Any] | None = None,
+    progress: Callable[[str, str | None, int | None], None] | None = None,
 ) -> dict[str, Any]:
     return await PipelineOrchestrator().run(
         cdp_url,
         page_url,
         job_pattern=job_pattern,
         pagination_plan=pagination_plan,
+        progress=progress,
     )
 
 

@@ -14,6 +14,7 @@ from services.grid_session import (
 )
 from services.selenium_session_heartbeat import SeleniumSessionHeartbeat
 from services.selenium_session_slot_service import get_selenium_session_slot_service
+from services.process_runtime_service import get_process_runtime_service
 from utils.logging import get_logger, log_event
 
 
@@ -36,6 +37,7 @@ class SearchNodeProcessor:
         worker_name: str,
         task_id: str,
     ) -> dict[str, Any]:
+        domain_ref = {**domain_ref, "dispatch_process_id": process_id}
         if self._has_supplied_career_url(domain_ref):
             return self._supplied_career_url_result(domain_ref)
         slot = self._claim_slot(process_id, domain_ref, worker_name, task_id)
@@ -72,15 +74,19 @@ class SearchNodeProcessor:
         with SeleniumSessionHeartbeat(slot["slot_id"]):
             try:
                 self._log_session_create_started(domain_ref, slot)
+                self._progress(domain_ref, "creating_selenium_session")
                 session = await self._create_selenium_session(slot)
                 self._attach_session(slot, session.session_id)
                 self._log_session_created(domain_ref, slot, session.session_id)
                 self._heartbeat(slot)
+                self._progress(domain_ref, "attaching_browser")
                 browser_session = await self._attach_browser(session.cdp_url)
                 self._log_browser_attached(domain_ref, session.session_id)
                 self._heartbeat(slot)
+                self._progress(domain_ref, "running_url_extraction", domain_ref.get("domain"))
                 node_result = await self._run_search_node(domain_ref, browser_session, slot)
                 self._heartbeat(slot)
+                self._progress(domain_ref, "search_completed", domain_ref.get("domain"))
                 return self._result(domain_ref, slot, node_result, time.monotonic() - started)
             finally:
                 await close_browser_attachment(browser_session)
@@ -109,6 +115,8 @@ class SearchNodeProcessor:
             browser_session,
             registered_domain=domain_ref["registered_domain"],
             heartbeat=lambda: self._heartbeat(slot),
+            progress=lambda step, current_url=None: self._progress(domain_ref, step, current_url),
+            step_timeout_seconds=get_settings().node_step_timeout_seconds,
         )
 
     async def _close_selenium_session(self, slot: dict[str, Any], session: Any) -> None:
@@ -199,6 +207,17 @@ class SearchNodeProcessor:
 
     def _heartbeat(self, slot: dict[str, Any]) -> None:
         get_selenium_session_slot_service().heartbeat_slot(slot["slot_id"])
+
+    def _progress(self, domain_ref: dict[str, Any], step: str, current_url: str | None = None) -> None:
+        process_id = str(domain_ref.get("dispatch_process_id") or "")
+        if not process_id:
+            return
+        get_process_runtime_service().update_domain_progress(
+            process_id,
+            domain_ref["registered_domain"],
+            step=step,
+            current_url=current_url,
+        )
 
     def _has_supplied_career_url(self, domain_ref: dict[str, Any]) -> bool:
         return bool(str(domain_ref.get("career_url") or "").strip())

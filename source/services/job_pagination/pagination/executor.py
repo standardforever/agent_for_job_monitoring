@@ -283,6 +283,7 @@ async def execute_pagination(
         method=navigation.get("method"),
     )
     for index in range(2, max_pages + 1):
+        context.set_progress("pagination_page_started", page.url, index)
         repair_attempts = 0
         navigated = False
         used_method = None
@@ -305,6 +306,7 @@ async def execute_pagination(
                     url_plan_disabled = True
                 else:
                     log_event(logger, "info", "pagination_url_attempt_started", domain="job_pagination", page_url=page.url, page_index=index, target_url=target_url)
+                    context.set_progress("pagination_loading_url_page", target_url, index)
                     ok, detail = await _load_url_page(page, target_url)
                     used_method = "url"
                     navigated = ok
@@ -333,6 +335,7 @@ async def execute_pagination(
                     context.add_error("pagination_end_detected", detail, page_index=index, method="click")
                 else:
                     log_event(logger, "info", "pagination_click_attempt_started", domain="job_pagination", page_url=page.url, page_index=index)
+                    context.set_progress("pagination_clicking_next_page", page.url, index)
                     before_click_url = page.url
                     ok, detail, disabled, click_evidence = await _click_next_page(
                         page,
@@ -463,6 +466,7 @@ async def execute_pagination(
             context.add_error("pagination_execution", detail or "navigation_failed", page_index=index)
             break
 
+        context.set_progress("pagination_extracting_page_jobs", page.url, index)
         extraction = await extractor.extract_current_page(page, context, used_method or "pagination")
         url_changed = bool((action_evidence or {}).get("url_changed"))
         report = {

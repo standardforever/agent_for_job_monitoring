@@ -120,6 +120,30 @@ class ProcessRuntimeService:
         )
         get_search_run_service().heartbeat(registered_domain)
 
+    def update_domain_progress(
+        self,
+        process_id: str,
+        registered_domain: str,
+        *,
+        step: str,
+        current_url: str | None = None,
+        page_index: int | None = None,
+    ) -> None:
+        timestamp = _now()
+        fields: dict[str, Any] = {
+            "current_step": step,
+            "last_step_at": timestamp,
+            "updated_at": timestamp,
+        }
+        if current_url:
+            fields["current_url"] = current_url
+        if page_index is not None:
+            fields["current_page_index"] = page_index
+        self._process_refs.update_one(
+            {"process_id": process_id, "registered_domain": registered_domain, "status": "processing"},
+            {"$set": fields},
+        )
+
     def complete_with_reused_result(self, process_id: str, registered_domain: str) -> None:
         ref = self._get_queued_ref(process_id, registered_domain)
         if not ref:
@@ -307,6 +331,10 @@ class ProcessRuntimeService:
                     "failure_type": "",
                     "failed_at": "",
                     "last_requeue_reason": "",
+                    "current_step": "",
+                    "current_url": "",
+                    "current_page_index": "",
+                    "last_step_at": "",
                 },
             },
         )
@@ -405,7 +433,17 @@ class ProcessRuntimeService:
             {"process_id": process_id, "registered_domain": ref["registered_domain"], "status": expected_status},
             {
                 "$set": update,
-                "$unset": {"worker_name": "", "celery_task_id": "", "heartbeat_at": "", "lease_expires_at": "", "dispatched_at": ""},
+                "$unset": {
+                    "worker_name": "",
+                    "celery_task_id": "",
+                    "heartbeat_at": "",
+                    "lease_expires_at": "",
+                    "dispatched_at": "",
+                    "current_step": "",
+                    "current_url": "",
+                    "current_page_index": "",
+                    "last_step_at": "",
+                },
             },
         )
         self._refresh_process_totals(process_id)
@@ -413,7 +451,19 @@ class ProcessRuntimeService:
 
     def _clean_runtime_ref(self, ref: dict[str, Any]) -> dict[str, Any]:
         cleaned = dict(ref)
-        for key in ("_id", "worker_name", "celery_task_id", "heartbeat_at", "lease_expires_at", "uses_process_supplied_career_url", "dispatched_at"):
+        for key in (
+            "_id",
+            "worker_name",
+            "celery_task_id",
+            "heartbeat_at",
+            "lease_expires_at",
+            "uses_process_supplied_career_url",
+            "dispatched_at",
+            "current_step",
+            "current_url",
+            "current_page_index",
+            "last_step_at",
+        ):
             cleaned.pop(key, None)
         return cleaned
 
@@ -532,7 +582,16 @@ class ProcessRuntimeService:
             {"process_id": process_id, "registered_domain": ref["registered_domain"], "status": "processing"},
             {
                 "$set": queued_ref,
-                "$unset": {"worker_name": "", "celery_task_id": "", "heartbeat_at": "", "lease_expires_at": ""},
+                "$unset": {
+                    "worker_name": "",
+                    "celery_task_id": "",
+                    "heartbeat_at": "",
+                    "lease_expires_at": "",
+                    "current_step": "",
+                    "current_url": "",
+                    "current_page_index": "",
+                    "last_step_at": "",
+                },
             },
         )
         self._release_global_domain(ref["registered_domain"])

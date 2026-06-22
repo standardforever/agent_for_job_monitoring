@@ -37,6 +37,7 @@ class JobPaginationNodeProcessor:
         self._mongodb = mongodb or get_sync_mongodb_service()
         self._clients = self._mongodb.collection(self._settings.mongodb_clients_collection)
         self._processes = self._mongodb.collection(self._settings.mongodb_process_uploads_collection)
+        self._pagination_runs = self._mongodb.collection(self._settings.mongodb_job_pagination_runs_collection)
 
     def process(
         self,
@@ -101,10 +102,13 @@ class JobPaginationNodeProcessor:
         with SeleniumSessionHeartbeat(slot["slot_id"]):
             try:
                 self._log_session_create_started(task, slot)
+                self._progress(task, "pagination_creating_selenium_session")
                 session = await self._create_selenium_session(slot)
                 self._attach_session(slot, session.session_id)
                 self._heartbeat(slot)
+                self._progress(task, "pagination_running_patterns")
                 patterns = await self._run_patterns(task, session.cdp_url, slot)
+                self._progress(task, "pagination_completed")
                 return self._result(task, patterns, time.monotonic() - started)
             finally:
                 await self._close_selenium_session(slot, session)
@@ -133,11 +137,18 @@ class JobPaginationNodeProcessor:
     ) -> dict[str, Any]:
         page_url = str(pattern_entry.get("page_url") or "").strip()
         self._log_started(task, page_url)
+        self._progress(task, "pagination_pattern_started", page_url, 1)
         result = await run_pipeline(
             cdp_url,
             page_url,
             job_pattern=pattern_entry.get("pattern") or {},
             pagination_plan=pattern_entry.get("pagination") or {},
+            progress=lambda step, current_url=None, page_index=None: self._progress(
+                task,
+                step,
+                current_url,
+                page_index,
+            ),
         )
         self._heartbeat(slot)
         return {
@@ -216,6 +227,28 @@ class JobPaginationNodeProcessor:
     def _heartbeat(self, slot: dict[str, Any]) -> None:
         get_selenium_session_slot_service().heartbeat_slot(slot["slot_id"])
 
+    def _progress(
+        self,
+        task: dict[str, Any],
+        step: str,
+        current_url: str | None = None,
+        page_index: int | None = None,
+    ) -> None:
+        timestamp = _now()
+        fields: dict[str, Any] = {
+            "current_step": step,
+            "last_step_at": timestamp,
+            "updated_at": timestamp,
+        }
+        if current_url:
+            fields["current_url"] = current_url
+        if page_index is not None:
+            fields["current_page_index"] = page_index
+        self._pagination_runs.update_one(
+            {"job_pagination_run_key": self._pagination_run_key(task["registered_domain"]), "status": "running"},
+            {"$set": fields},
+        )
+
     def _log_started(self, task: dict[str, Any], page_url: str) -> None:
         log_event(logger, "info", "job_pagination_pattern_started", domain="job_pagination", registered_domain=task["registered_domain"], page_url=page_url)
 
@@ -229,3 +262,6 @@ class JobPaginationNodeProcessor:
             selenium_node_id=slot["selenium_node_id"],
             slot_id=slot["slot_id"],
         )
+
+    def _pagination_run_key(self, registered_domain: str) -> str:
+        return f"shared:{registered_domain}"
