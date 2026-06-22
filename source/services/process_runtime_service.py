@@ -178,9 +178,15 @@ class ProcessRuntimeService:
 
     def requeue_stale_processing(self, process_id: str) -> int:
         stale_refs = self._stale_refs(process_id)
+        timed_out_refs = self._timed_out_refs(process_id)
+        timed_out_domains = {str(ref.get("registered_domain") or "") for ref in timed_out_refs}
         for ref in stale_refs:
+            if str(ref.get("registered_domain") or "") in timed_out_domains:
+                continue
             self._requeue_process_ref(process_id, ref)
-        return len(stale_refs)
+        for ref in timed_out_refs:
+            self._fail_timed_out_ref(process_id, ref)
+        return len(stale_refs) + len(timed_out_refs)
 
     def _ensure_ref_state(self, process_id: str) -> None:
         self._ref_service.ensure_indexes()
@@ -492,6 +498,17 @@ class ProcessRuntimeService:
         refs = self._process_refs.find({"process_id": process_id, "status": "processing"})
         return [ref for ref in refs if self._is_stale_ref(ref, threshold)]
 
+    def _timed_out_refs(self, process_id: str) -> list[dict[str, Any]]:
+        timeout_seconds = max(60, int(self._settings.node_task_hard_time_limit_seconds))
+        threshold = _now() - timedelta(seconds=timeout_seconds)
+        refs = self._process_refs.find({"process_id": process_id, "status": "processing"})
+        return [
+            ref
+            for ref in refs
+            if isinstance(ref.get("started_at"), datetime)
+            and self._aware_datetime(ref["started_at"]) < threshold
+        ]
+
     def _is_stale_ref(self, ref: dict[str, Any], threshold: datetime) -> bool:
         lease_expires_at = ref.get("lease_expires_at")
         if isinstance(lease_expires_at, datetime):
@@ -520,6 +537,11 @@ class ProcessRuntimeService:
         )
         self._release_global_domain(ref["registered_domain"])
         self._refresh_process_totals(process_id)
+
+    def _fail_timed_out_ref(self, process_id: str, ref: dict[str, Any]) -> None:
+        timeout_seconds = max(60, int(self._settings.node_task_hard_time_limit_seconds))
+        error = f"Domain processing exceeded max runtime of {timeout_seconds} seconds"
+        self.fail_domain(process_id, ref, error)
 
     def _refresh_process_totals(self, process_id: str) -> dict[str, int]:
         return self._ref_service.refresh_process_totals(process_id, self._processes)
