@@ -228,6 +228,11 @@
       padding: 14px;
     }
 
+    .client-card.selected {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(23, 107, 135, 0.12);
+    }
+
     .client-card header {
       align-items: start;
       display: flex;
@@ -417,7 +422,10 @@
 
       <div class="panel wide">
         <div class="toolbar">
-          <h2>Process uploads</h2>
+          <div>
+            <h2>Client processes</h2>
+            <div class="meta" id="selectedClientLabel">Select a client to view or upload processes.</div>
+          </div>
           <div class="actions" style="margin-top: 0;">
             <button class="primary" id="runAllPipelinesButton" type="button">Run all pipelines</button>
             <button class="secondary" id="refreshProcessesButton" type="button">Refresh</button>
@@ -426,7 +434,7 @@
         <form id="uploadForm" class="form-grid">
           <label>
             Client name
-            <input id="uploadClientNameInput" required autocomplete="off" placeholder="acme">
+            <input id="uploadClientNameInput" required readonly autocomplete="off" placeholder="Select client first">
           </label>
           <label>
             Agent count
@@ -450,6 +458,7 @@
   <script>
     const state = {
       editingClientName: null,
+      selectedClientName: null,
       clients: [],
     };
 
@@ -478,6 +487,7 @@
       refreshProcessesButton: document.querySelector("#refreshProcessesButton"),
       runAllPipelinesButton: document.querySelector("#runAllPipelinesButton"),
       processList: document.querySelector("#processList"),
+      selectedClientLabel: document.querySelector("#selectedClientLabel"),
     };
 
     function getPassword() {
@@ -547,7 +557,7 @@
     async function loadClients() {
       if (!getPassword()) {
         elements.clientList.innerHTML = '<div class="empty">Enter the admin password to load clients.</div>';
-        elements.processList.innerHTML = '<div class="empty">Enter the admin password to load processes.</div>';
+        resetSelectedClient();
         return;
       }
 
@@ -555,6 +565,9 @@
       try {
         const data = await request("/clients");
         state.clients = data.clients || [];
+        if (state.selectedClientName && !state.clients.some((client) => client.client_name === state.selectedClientName)) {
+          resetSelectedClient();
+        }
         renderClients();
         clearNotice();
       } catch (error) {
@@ -570,10 +583,14 @@
         elements.processList.innerHTML = '<div class="empty">Enter the admin password to load processes.</div>';
         return;
       }
+      if (!state.selectedClientName) {
+        elements.processList.innerHTML = '<div class="empty">Select a client to load their processes.</div>';
+        return;
+      }
 
       elements.refreshProcessesButton.disabled = true;
       try {
-        const data = await request("/processes");
+        const data = await request(`/processes?client_name=${encodeURIComponent(state.selectedClientName)}&limit=100`);
         renderProcesses(data.processes || []);
       } catch (error) {
         elements.processList.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
@@ -584,7 +601,7 @@
 
     function renderProcesses(processes) {
       if (!processes.length) {
-        elements.processList.innerHTML = '<div class="empty">No process uploads created yet.</div>';
+        elements.processList.innerHTML = `<div class="empty">No process uploads created for ${escapeHtml(state.selectedClientName || "this client")} yet.</div>`;
         return;
       }
 
@@ -1002,17 +1019,20 @@
 
       elements.clientList.innerHTML = state.clients.map((client) => {
         const emails = (client.email || []).map((email) => `<span class="chip">${escapeHtml(email)}</span>`).join("");
+        const selected = client.client_name === state.selectedClientName;
         return `
-          <article class="client-card">
+          <article class="client-card ${selected ? "selected" : ""}">
             <header>
               <div>
                 <div class="client-name">${escapeHtml(client.client_name || "")}</div>
                 <div class="meta">
                   <span>Model: ${escapeHtml(client.model || "")}</span>
                   <span>Key: ${escapeHtml(client.api_key_preview || "***")}</span>
+                  ${selected ? '<span class="chip ok">Selected</span>' : ""}
                 </div>
               </div>
               <div class="actions" style="margin-top: 0;">
+                <button class="primary" type="button" data-action="select" data-client="${escapeAttr(client.client_name)}">Open processes</button>
                 <button class="secondary" type="button" data-action="edit" data-client="${escapeAttr(client.client_name)}">Edit</button>
                 <button class="danger" type="button" data-action="delete" data-client="${escapeAttr(client.client_name)}">Delete</button>
               </div>
@@ -1021,6 +1041,21 @@
           </article>
         `;
       }).join("");
+    }
+
+    function resetSelectedClient() {
+      state.selectedClientName = null;
+      elements.uploadClientNameInput.value = "";
+      elements.selectedClientLabel.textContent = "Select a client to view or upload processes.";
+      elements.processList.innerHTML = '<div class="empty">Select a client to load their processes.</div>';
+    }
+
+    async function selectClient(clientName) {
+      state.selectedClientName = clientName;
+      elements.uploadClientNameInput.value = clientName;
+      elements.selectedClientLabel.textContent = `Showing processes for ${clientName}`;
+      renderClients();
+      await loadProcesses();
     }
 
     function resetForm() {
@@ -1060,10 +1095,13 @@
       try {
         await request(`/clients/${encodeURIComponent(clientName)}`, { method: "DELETE" });
         showNotice("Client deleted.");
-        await loadClients();
+        if (state.selectedClientName === clientName) {
+          resetSelectedClient();
+        }
         if (state.editingClientName === clientName) {
           resetForm();
         }
+        await loadClients();
       } catch (error) {
         showNotice(error.message, "bad");
       }
@@ -1089,6 +1127,8 @@
 
       elements.submitButton.disabled = true;
       try {
+        const previousClientName = state.editingClientName;
+        const savedClientName = body.client_name;
         if (state.editingClientName) {
           await request(`/clients/${encodeURIComponent(state.editingClientName)}`, {
             method: "PATCH",
@@ -1104,6 +1144,9 @@
         }
         resetForm();
         await loadClients();
+        if (!previousClientName || state.selectedClientName === previousClientName || !state.selectedClientName) {
+          await selectClient(savedClientName);
+        }
       } catch (error) {
         showNotice(error.message, "bad");
       } finally {
@@ -1117,9 +1160,13 @@
         showNotice("Enter the admin password first.", "bad");
         return;
       }
+      if (!state.selectedClientName) {
+        showNotice("Select a client before creating a process.", "bad");
+        return;
+      }
 
       const formData = new FormData();
-      formData.append("client_name", elements.uploadClientNameInput.value.trim());
+      formData.append("client_name", state.selectedClientName);
       formData.append("agent_count", elements.agentCountInput.value);
       formData.append("upload_file", elements.processFileInput.files[0]);
 
@@ -1130,6 +1177,7 @@
           body: formData,
         });
         elements.uploadForm.reset();
+        elements.uploadClientNameInput.value = state.selectedClientName;
         elements.agentCountInput.value = "1";
         showNotice(`Process created: ${data.process.process_id}`);
         await loadProcesses();
@@ -1285,7 +1333,6 @@
       localStorage.setItem("admin_registration_password", getPassword());
       showNotice("Password saved in this browser.");
       loadClients();
-      loadProcesses();
     }
 
     function clearPassword() {
@@ -1323,6 +1370,9 @@
         return;
       }
       const clientName = button.dataset.client;
+      if (button.dataset.action === "select") {
+        selectClient(clientName);
+      }
       if (button.dataset.action === "edit") {
         editClient(clientName);
       }
@@ -1367,7 +1417,7 @@
     elements.passwordInput.value = localStorage.getItem("admin_registration_password") || "";
     checkHealth();
     loadClients();
-    loadProcesses();
+    resetSelectedClient();
   </script>
 </body>
 </html>

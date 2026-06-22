@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile
 
 from api.dependencies import validate_admin_password
 from services.file_input_service import FileInputService
@@ -49,9 +49,14 @@ async def upload_process_file(
 
 
 @router.get("/processes")
-async def list_processes(_: None = Depends(validate_admin_password)) -> dict[str, Any]:
-    log_event(logger, "info", "process_list_requested", domain="api")
-    return await get_process_upload_service().list_processes()
+async def list_processes(
+    client_name: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    _: None = Depends(validate_admin_password),
+) -> dict[str, Any]:
+    clean_client_name = str(client_name or "").strip() or None
+    log_event(logger, "info", "process_list_requested", domain="api", client_name=clean_client_name, limit=limit)
+    return await get_process_upload_service().list_processes(limit=limit, client_name=clean_client_name)
 
 
 @router.get("/processes/{process_id}")

@@ -417,9 +417,12 @@ class ProcessUploadService:
             "failed": [],
         }
 
-    async def list_processes(self, limit: int = 25) -> dict[str, Any]:
+    async def list_processes(self, limit: int = 25, client_name: str | None = None) -> dict[str, Any]:
         await self._ensure_indexes()
-        cursor = self._processes.find({}).sort("created_at", DESCENDING).limit(limit)
+        query: dict[str, Any] = {}
+        if client_name:
+            query["client.client_name"] = client_name
+        cursor = self._processes.find(query).sort("created_at", DESCENDING).limit(limit)
         processes = [self._serialize_process(await self._ensure_process_schema(document)) async for document in cursor]
         return {"processes": processes, "count": len(processes)}
 
