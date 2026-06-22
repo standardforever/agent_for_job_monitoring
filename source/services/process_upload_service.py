@@ -194,6 +194,7 @@ class ProcessUploadService:
             "processing": 0,
             "completed": 0,
             "failed": 0,
+            "blocked": 0,
             "supplied_career_urls": self._supplied_career_url_count(domain_refs),
         }
 

@@ -61,7 +61,11 @@ class ProcessRuntimeService:
         capacity = self._available_process_capacity(process)
         if capacity <= 0:
             return []
-        return self._queued_refs(process_id)[:capacity]
+        refs = self._queued_refs(process_id)
+        if not refs:
+            self._refresh_process_status(process_id)
+            return []
+        return refs[:capacity]
 
     def mark_domain_dispatched(self, process_id: str, registered_domain: str) -> bool:
         threshold = _now() - timedelta(seconds=max(30, self._settings.watchdog_interval_seconds * 2))
@@ -529,11 +533,15 @@ class ProcessRuntimeService:
         totals = self._refresh_process_totals(process["process_id"])
         if totals.get("processing", 0) > 0:
             return "running"
-        if totals.get("queued", 0) > 0:
+        if self._queued_refs(process["process_id"]):
             if process.get("status") == "running":
                 return "running"
             return "queued"
-        return terminal_status(completed=int(totals.get("completed") or 0), failed=int(totals.get("failed") or 0))
+        return terminal_status(
+            completed=int(totals.get("completed") or 0),
+            failed=int(totals.get("failed") or 0),
+            blocked=int(totals.get("blocked") or 0),
+        )
 
 
 @lru_cache(maxsize=1)

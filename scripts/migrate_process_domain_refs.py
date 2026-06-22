@@ -115,14 +115,32 @@ def refs_from_process(process: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def totals_from_refs(refs: list[dict[str, Any]]) -> dict[str, int]:
-    totals = {"domains": len(refs), "queued": 0, "processing": 0, "completed": 0, "failed": 0, "supplied_career_urls": 0}
+    totals = {
+        "domains": len(refs),
+        "queued": 0,
+        "processing": 0,
+        "completed": 0,
+        "failed": 0,
+        "blocked": 0,
+        "supplied_career_urls": 0,
+    }
     for ref in refs:
         status = str(ref.get("status") or "queued")
+        if status == "queued" and not search_enabled(ref):
+            totals["blocked"] += 1
+            continue
         if status in totals:
             totals[status] += 1
         if ref.get("career_url"):
             totals["supplied_career_urls"] += 1
     return totals
+
+
+def search_enabled(ref: dict[str, Any]) -> bool:
+    if ref.get("enabled") is False:
+        return False
+    control = ((ref.get("node_controls") or {}).get("search") or {})
+    return control.get("enabled") is not False and control.get("stopped") is not True
 
 
 def migrate(*, apply: bool, compact: bool) -> None:

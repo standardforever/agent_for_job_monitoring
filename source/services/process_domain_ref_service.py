@@ -55,26 +55,33 @@ class ProcessDomainRefService:
 
     def counts(self, process_id: str) -> dict[str, int]:
         self.ensure_indexes()
-        totals = {"domains": 0, "queued": 0, "processing": 0, "completed": 0, "failed": 0, "supplied_career_urls": 0}
-        for row in self._refs.aggregate(
-            [
-                {"$match": {"process_id": process_id}},
-                {
-                    "$group": {
-                        "_id": "$status",
-                        "count": {"$sum": 1},
-                        "supplied": {"$sum": {"$cond": [{"$ne": [{"$ifNull": ["$career_url", ""]}, ""]}, 1, 0]}},
-                    }
-                },
-            ]
-        ):
-            status = str(row.get("_id") or "queued")
-            count = int(row.get("count") or 0)
-            totals["domains"] += count
-            totals["supplied_career_urls"] += int(row.get("supplied") or 0)
+        totals = {
+            "domains": 0,
+            "queued": 0,
+            "processing": 0,
+            "completed": 0,
+            "failed": 0,
+            "blocked": 0,
+            "supplied_career_urls": 0,
+        }
+        projection = {"status": 1, "career_url": 1, "enabled": 1, "node_controls.search": 1}
+        for ref in self._refs.find({"process_id": process_id}, projection):
+            totals["domains"] += 1
+            if ref.get("career_url"):
+                totals["supplied_career_urls"] += 1
+            status = str(ref.get("status") or "queued")
+            if status == "queued" and not self._search_enabled(ref):
+                totals["blocked"] += 1
+                continue
             if status in totals:
-                totals[status] += count
+                totals[status] += 1
         return totals
+
+    def _search_enabled(self, ref: dict[str, Any]) -> bool:
+        if ref.get("enabled") is False:
+            return False
+        control = ((ref.get("node_controls") or {}).get("search") or {})
+        return control.get("enabled") is not False and control.get("stopped") is not True
 
     def refresh_process_totals(self, process_id: str, processes_collection: Any) -> dict[str, int]:
         totals = self.counts(process_id)
