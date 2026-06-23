@@ -25,7 +25,8 @@ class SearchNodeService:
         from infrastructure.tasks import run_search_node
 
         registered_domain = ref["registered_domain"]
-        if not get_process_runtime_service().mark_domain_dispatched(process_id, registered_domain):
+        runtime = get_process_runtime_service()
+        if not runtime.mark_domain_dispatched(process_id, registered_domain):
             log_event(
                 logger,
                 "info",
@@ -44,7 +45,20 @@ class SearchNodeService:
             process_id=process_id,
             registered_domain=registered_domain,
         )
-        run_search_node.apply_async(args=[process_id, registered_domain], queue="processes")
+        try:
+            run_search_node.apply_async(args=[process_id, registered_domain], queue="processes")
+        except Exception:
+            runtime.clear_domain_dispatch(process_id, registered_domain, "celery_publish_failed")
+            log_event(
+                logger,
+                "exception",
+                "search_node_domain_dispatch_failed",
+                domain="search_node",
+                process_id=process_id,
+                registered_domain=registered_domain,
+                exc_info=True,
+            )
+            raise
 
 
 @lru_cache(maxsize=1)

@@ -55,6 +55,7 @@ class ProcessRuntimeService:
         return {"mode": mode, "refs": refs}
 
     def dispatchable_refs(self, process_id: str) -> list[dict[str, Any]]:
+        self.repair_stale_dispatched_queued(process_id)
         process = self._load_process(process_id)
         if process.get("status") != "running":
             return []
@@ -68,7 +69,7 @@ class ProcessRuntimeService:
         return refs[:capacity]
 
     def mark_domain_dispatched(self, process_id: str, registered_domain: str) -> bool:
-        threshold = _now() - timedelta(seconds=max(30, self._settings.watchdog_interval_seconds * 2))
+        threshold = self._dispatch_threshold()
         result = self._process_refs.update_one(
             {
                 "process_id": process_id,
@@ -82,6 +83,39 @@ class ProcessRuntimeService:
             {"$set": {"dispatched_at": _now(), "updated_at": _now()}},
         )
         return bool(result.modified_count)
+
+    def clear_domain_dispatch(self, process_id: str, registered_domain: str, reason: str) -> None:
+        self._process_refs.update_one(
+            {"process_id": process_id, "registered_domain": registered_domain, "status": "queued"},
+            {
+                "$set": {"updated_at": _now(), "last_dispatch_clear_reason": reason},
+                "$unset": {"dispatched_at": ""},
+            },
+        )
+
+    def repair_stale_dispatched_queued(self, process_id: str) -> int:
+        result = self._process_refs.update_many(
+            {
+                "process_id": process_id,
+                "status": "queued",
+                "dispatched_at": {"$lt": self._dispatch_threshold()},
+            },
+            {
+                "$set": {
+                    "updated_at": _now(),
+                    "last_dispatch_clear_reason": "stale_dispatched_queued",
+                },
+                "$unset": {"dispatched_at": ""},
+            },
+        )
+        if result.modified_count:
+            self._refresh_process_totals(process_id)
+            self._refresh_process_status(process_id)
+        return int(result.modified_count)
+
+    def _dispatch_threshold(self) -> datetime:
+        timeout_seconds = max(60, self._settings.watchdog_interval_seconds * 3)
+        return _now() - timedelta(seconds=timeout_seconds)
 
     def claim_domain_for_process(
         self,

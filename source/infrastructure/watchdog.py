@@ -101,7 +101,19 @@ def _enqueue_process_domains(process: dict[str, Any]) -> None:
             process_id=process["process_id"],
             registered_domain=ref["registered_domain"],
         )
-        run_search_node.apply_async(args=[process["process_id"], ref["registered_domain"]], queue="processes")
+        try:
+            run_search_node.apply_async(args=[process["process_id"], ref["registered_domain"]], queue="processes")
+        except Exception:
+            runtime.clear_domain_dispatch(process["process_id"], ref["registered_domain"], "celery_publish_failed")
+            log_event(
+                logger,
+                "exception",
+                "watchdog_domain_task_dispatch_failed",
+                domain="watchdog",
+                process_id=process["process_id"],
+                registered_domain=ref["registered_domain"],
+                exc_info=True,
+            )
 
 
 def _enqueue_waiting_category_tasks() -> None:
