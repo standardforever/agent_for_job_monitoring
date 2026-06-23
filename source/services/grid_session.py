@@ -22,6 +22,7 @@ from selenium.webdriver.remote.webdriver import WebDriver
 logger = get_logger("grid_session")
 _DRIVER_REGISTRY: dict[str, WebDriver] = {}
 _DRIVER_REGISTRY_LOCK = Lock()
+PLAYWRIGHT_CLOSE_TIMEOUT_SECONDS = 5
 
 
 @dataclass(slots=True)
@@ -497,7 +498,7 @@ async def close_browser_attachment(session: BrowserSession | None) -> None:
 
     try:
         if not session.page.is_closed():
-            await session.page.close()
+            await asyncio.wait_for(session.page.close(), timeout=PLAYWRIGHT_CLOSE_TIMEOUT_SECONDS)
             log_event(
                 logger,
                 "info",
@@ -506,13 +507,31 @@ async def close_browser_attachment(session: BrowserSession | None) -> None:
                 domain=session.cdp_url,
                 session_id=session.session_id,
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        log_event(
+            logger,
+            "warning",
+            "playwright_page_close_failed session_id=%s error=%s",
+            session.session_id,
+            str(exc),
+            domain=session.cdp_url,
+            session_id=session.session_id,
+            error=str(exc),
+        )
 
     try:
-        await session.playwright.stop()
-    except Exception:
-        pass
+        await asyncio.wait_for(session.playwright.stop(), timeout=PLAYWRIGHT_CLOSE_TIMEOUT_SECONDS)
+    except Exception as exc:
+        log_event(
+            logger,
+            "warning",
+            "playwright_stop_failed session_id=%s error=%s",
+            session.session_id,
+            str(exc),
+            domain=session.cdp_url,
+            session_id=session.session_id,
+            error=str(exc),
+        )
 
 
 def close_shared_session(session_id: str | None) -> None:
