@@ -111,7 +111,7 @@ class SearchRunService:
         if completed:
             return {"status": "fresh_completed", "run": completed}
         self.initialize_domains([ref])
-        if self._attempts_exhausted(ref["registered_domain"]) and not self._last_attempt_failed(ref["registered_domain"]):
+        if self._attempts_exhausted(ref["registered_domain"]):
             return {"status": "max_attempts_exceeded"}
         claimed = self._claim_runnable(ref, worker_name, task_id)
         if not claimed:
