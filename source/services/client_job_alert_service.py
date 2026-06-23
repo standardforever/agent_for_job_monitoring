@@ -24,6 +24,8 @@ class ClientJobAlertService:
     def __init__(self, mongodb: SyncMongoDBService, settings: Settings) -> None:
         self._settings = settings
         self._processes = mongodb.collection(settings.mongodb_process_uploads_collection)
+        self._process_refs = mongodb.collection(settings.mongodb_process_domain_refs_collection)
+        self._jobs = mongodb.collection(settings.mongodb_domain_jobs_collection)
         self._reports = mongodb.collection(settings.mongodb_client_job_reports_collection)
         self._alerts = mongodb.collection(settings.mongodb_client_job_alerts_collection)
         self._indexes_ready = False
@@ -41,6 +43,7 @@ class ClientJobAlertService:
         self.ensure_indexes()
         process = self._load_process(process_id)
         report = self._load_report(process_id, pipeline_run_id)
+        report = self._refresh_report_jobs(process, report)
         alert = self._build_alert(process, report)
         self._alerts.update_one({"pipeline_run_id": pipeline_run_id}, {"$set": alert}, upsert=True)
         self._remember_alert(process_id, alert)
@@ -134,6 +137,61 @@ class ClientJobAlertService:
         if not alert:
             raise ValueError(f"Alert '{alert_id}' was not found")
         return alert
+
+    def _refresh_report_jobs(self, process: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+        domains = self._report_domains(process, report)
+        jobs = self._new_jobs(domains, report.get("since"))
+        timestamp = _now()
+        update = {
+            "domains": domains,
+            "jobs": jobs,
+            "new_jobs_count": len(jobs),
+            "generated_at": timestamp,
+            "updated_at": timestamp,
+        }
+        self._reports.update_one({"pipeline_run_id": report["pipeline_run_id"]}, {"$set": update})
+        refreshed = {**report, **update}
+        log_event(
+            logger,
+            "info",
+            "client_job_report_refreshed",
+            domain="alerts",
+            process_id=process.get("process_id"),
+            pipeline_run_id=report.get("pipeline_run_id"),
+            domain_count=len(domains),
+            new_jobs_count=len(jobs),
+        )
+        return refreshed
+
+    def _report_domains(self, process: dict[str, Any], report: dict[str, Any]) -> list[str]:
+        existing_domains = [str(domain).strip() for domain in list(report.get("domains") or []) if str(domain).strip()]
+        if existing_domains:
+            return sorted(set(existing_domains))
+        cursor = self._process_refs.find(
+            {"process_id": process["process_id"], "status": "completed"},
+            {"_id": 0, "registered_domain": 1},
+        )
+        return sorted({str(ref.get("registered_domain") or "").strip() for ref in cursor if ref.get("registered_domain")})
+
+    def _new_jobs(self, domains: list[str], since: Any) -> list[dict[str, Any]]:
+        if not domains:
+            return []
+        query: dict[str, Any] = {"registered_domain": {"$in": domains}, "status": "active"}
+        if since:
+            query["first_seen_at"] = {"$gt": since}
+        cursor = self._jobs.find(
+            query,
+            {
+                "_id": 0,
+                "job_key": 1,
+                "registered_domain": 1,
+                "title": 1,
+                "job_url": 1,
+                "source_url": 1,
+                "first_seen_at": 1,
+            },
+        ).sort("first_seen_at", DESCENDING)
+        return list(cursor)
 
     def _build_alert(self, process: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
         filters = self._alert_filters(process)
