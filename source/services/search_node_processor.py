@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from core.config import get_settings
 from nodes.url_extraction import career_url_extraction_node
 from services.grid_session import (
     attach_playwright_to_cdp,
