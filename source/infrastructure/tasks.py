@@ -390,7 +390,8 @@ def _handle_claim(
     if status == "max_attempts_exceeded":
         return _fail_queued_domain(process_id, registered_domain, "Maximum attempts exceeded")
     if status in {"busy", "process_at_capacity"}:
-        raise task.retry(countdown=10)
+        get_process_runtime_service().clear_domain_dispatch(process_id, registered_domain, status)
+        return {"status": status, "registered_domain": registered_domain}
     return {"status": status, "registered_domain": registered_domain}
 
 
