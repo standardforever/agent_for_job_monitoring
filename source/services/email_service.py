@@ -16,6 +16,8 @@ from textwrap import dedent
 from typing import Any
 
 import requests
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 from core.config import get_settings
 from utils.logging import get_logger, log_event
@@ -23,7 +25,7 @@ from utils.logging import get_logger, log_event
 logger = get_logger("email_service")
 
 API_URL = "https://api.resend.com/emails"
-ALLOWED_EXTENSIONS = {".pdf", ".csv", ".xlml"}
+ALLOWED_EXTENSIONS = {".pdf", ".csv", ".xlsx"}
 
 
 @dataclass(slots=True)
@@ -76,6 +78,23 @@ ALERT_JOBS_CSV_FIELDS = [
     "Source URL",
 ]
 
+C_HEADER_BG = "0D1B40"
+C_SECTION_BG = "1249A0"
+C_COL_HDR_BG = "1565C0"
+C_DATA_BG = "EBF2FF"
+C_DATA_SIDE_BG = "F4F7FF"
+C_FOOTER_BG = "EEF3FB"
+C_WHITE = "FFFFFF"
+C_SUBTITLE = "8BAED4"
+C_PERIOD = "6A9FD8"
+C_DARK_TEXT = "1A1A2E"
+C_DATE_TEXT = "555577"
+C_LINK = "1565C0"
+C_FOOTER_TEXT = "8899BB"
+C_BORDER_GRAY = "AAAAAA"
+C_BORDER_BLUE = "0D47A1"
+C_BORDER_LIGHT = "C5D3F0"
+
 
 def _csv_content(rows: list[dict[str, Any]], fieldnames: list[str] | None = None) -> str:
     output = io.StringIO()
@@ -113,6 +132,298 @@ def _format_report_datetime(value: Any) -> str:
     except ValueError:
         return raw_value
     return parsed.strftime("%d %b %Y  %H:%M")
+
+
+def _report_side(style: str | None, color: str | None = None) -> Side:
+    return Side(border_style=style, color=color)
+
+
+NO_REPORT_SIDE = _report_side(None)
+THIN_REPORT_GRAY = _report_side("thin", C_BORDER_GRAY)
+MED_REPORT_BLUE = _report_side("medium", C_BORDER_BLUE)
+HAIR_REPORT_LIGHT = _report_side("hair", C_BORDER_LIGHT)
+
+
+def _report_border(
+    *,
+    left: Side = NO_REPORT_SIDE,
+    right: Side = NO_REPORT_SIDE,
+    top: Side = NO_REPORT_SIDE,
+    bottom: Side = NO_REPORT_SIDE,
+) -> Border:
+    return Border(left=left, right=right, top=top, bottom=bottom)
+
+
+def _report_fill(hex_color: str) -> PatternFill:
+    return PatternFill("solid", fgColor=hex_color)
+
+
+def _report_font(
+    *,
+    name: str = "Arial",
+    size: int = 10,
+    bold: bool = False,
+    italic: bool = False,
+    underline: bool = False,
+    color: str = C_DARK_TEXT,
+) -> Font:
+    return Font(
+        name=name,
+        size=size,
+        bold=bold,
+        italic=italic,
+        underline="single" if underline else None,
+        color=color,
+    )
+
+
+def _report_align(horizontal: str = "left", vertical: str = "center", wrap: bool = False) -> Alignment:
+    return Alignment(horizontal=horizontal, vertical=vertical, wrap_text=wrap)
+
+
+def _set_report_cell(
+    worksheet: Any,
+    coordinate: str,
+    value: Any = None,
+    *,
+    fnt: Font | None = None,
+    fll: PatternFill | None = None,
+    aln: Alignment | None = None,
+    brd: Border | None = None,
+) -> None:
+    cell = worksheet[coordinate]
+    if value is not None:
+        cell.value = value
+    if fnt:
+        cell.font = fnt
+    if fll:
+        cell.fill = fll
+    if aln:
+        cell.alignment = aln
+    if brd:
+        cell.border = brd
+
+
+def _paint_report_outer_row(
+    worksheet: Any,
+    row: int,
+    fill_color: str | None,
+    *,
+    top: Side = NO_REPORT_SIDE,
+    bottom: Side = NO_REPORT_SIDE,
+) -> None:
+    row_fill = _report_fill(fill_color) if fill_color else None
+    for column in "BCDE":
+        _set_report_cell(worksheet, f"{column}{row}", fll=row_fill, brd=_report_border(top=top, bottom=bottom))
+    _set_report_cell(worksheet, f"A{row}", fll=row_fill, brd=_report_border(left=THIN_REPORT_GRAY, top=top, bottom=bottom))
+    _set_report_cell(worksheet, f"F{row}", fll=row_fill, brd=_report_border(right=THIN_REPORT_GRAY, top=top, bottom=bottom))
+
+
+def _format_alert_period(value: Any) -> str:
+    formatted = _format_report_datetime(value)
+    return formatted.replace("  ", ", ", 1) if formatted else ""
+
+
+def _alert_report_jobs(alert: dict[str, Any]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for job in list(alert.get("jobs_after_filter") or []):
+        rows.append(
+            {
+                "company": str(job.get("registered_domain") or "").strip(),
+                "job_title": str(job.get("title") or "").strip(),
+                "date_detected": _format_report_datetime(job.get("first_seen_at")),
+                "apply_url": str(job.get("job_url") or "").strip(),
+            }
+        )
+    return rows
+
+
+def _build_alert_jobs_xlsx(alert: dict[str, Any]) -> bytes:
+    jobs = _alert_report_jobs(alert)
+    generated_date = _format_report_datetime(alert.get("period_end") or datetime.now()).split("  ")[0]
+    report_start = _format_alert_period(alert.get("period_start")) or generated_date
+    report_end = _format_alert_period(alert.get("period_end")) or generated_date
+    branding = "ClickBuy.ai"
+    vacancy_word = "vacancy" if len(jobs) == 1 else "vacancies"
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "New Vacancies"
+    worksheet.sheet_view.showGridLines = False
+
+    worksheet.column_dimensions["A"].width = 3
+    worksheet.column_dimensions["B"].width = 28
+    worksheet.column_dimensions["C"].width = 48
+    worksheet.column_dimensions["D"].width = 20
+    worksheet.column_dimensions["E"].width = 22
+    worksheet.column_dimensions["F"].width = 3
+
+    worksheet.row_dimensions[1].height = 8
+    _paint_report_outer_row(worksheet, 1, C_HEADER_BG, top=THIN_REPORT_GRAY)
+
+    worksheet.row_dimensions[2].height = 38
+    _paint_report_outer_row(worksheet, 2, C_HEADER_BG)
+    worksheet.merge_cells("B2:E2")
+    _set_report_cell(
+        worksheet,
+        "B2",
+        value="🔍  HIRING SIGNAL REPORT",
+        fnt=_report_font(size=20, bold=True, color=C_WHITE),
+        fll=_report_fill(C_HEADER_BG),
+        aln=_report_align("left", "center"),
+    )
+
+    worksheet.row_dimensions[3].height = 20
+    _paint_report_outer_row(worksheet, 3, C_HEADER_BG)
+    worksheet.merge_cells("B3:E3")
+    _set_report_cell(
+        worksheet,
+        "B3",
+        value=f"New vacancies detected in the last 24 hours · Powered by {branding}",
+        fnt=_report_font(size=10, color=C_SUBTITLE),
+        fll=_report_fill(C_HEADER_BG),
+        aln=_report_align("left", "center"),
+    )
+
+    worksheet.row_dimensions[4].height = 20
+    _paint_report_outer_row(worksheet, 4, C_HEADER_BG)
+    worksheet.merge_cells("B4:E4")
+    _set_report_cell(
+        worksheet,
+        "B4",
+        value=f"Report period:  {report_start}  →  {report_end}",
+        fnt=_report_font(size=9, color=C_PERIOD),
+        fll=_report_fill(C_HEADER_BG),
+        aln=_report_align("left", "center"),
+    )
+
+    worksheet.row_dimensions[5].height = 10
+    _paint_report_outer_row(worksheet, 5, C_HEADER_BG)
+
+    worksheet.row_dimensions[6].height = 30
+    _set_report_cell(worksheet, "A6", fll=_report_fill(C_SECTION_BG), brd=_report_border(left=THIN_REPORT_GRAY))
+    worksheet.merge_cells("B6:C6")
+    _set_report_cell(
+        worksheet,
+        "B6",
+        value=f"📋  {len(jobs)} new {vacancy_word} found",
+        fnt=_report_font(size=11, bold=True, color=C_WHITE),
+        fll=_report_fill(C_SECTION_BG),
+        aln=_report_align("left", "center"),
+    )
+    _set_report_cell(worksheet, "C6", fll=_report_fill(C_SECTION_BG))
+    worksheet.merge_cells("D6:E6")
+    _set_report_cell(
+        worksheet,
+        "D6",
+        value=f"Generated: {generated_date}",
+        fnt=_report_font(size=9, color=C_SUBTITLE),
+        fll=_report_fill(C_SECTION_BG),
+        aln=_report_align("right", "center"),
+    )
+    _set_report_cell(worksheet, "E6", fll=_report_fill(C_SECTION_BG))
+    _set_report_cell(worksheet, "F6", fll=_report_fill(C_SECTION_BG), brd=_report_border(right=THIN_REPORT_GRAY))
+
+    worksheet.row_dimensions[7].height = 8
+    _set_report_cell(worksheet, "A7", brd=_report_border(left=THIN_REPORT_GRAY))
+    _set_report_cell(worksheet, "F7", brd=_report_border(right=THIN_REPORT_GRAY))
+
+    worksheet.row_dimensions[8].height = 28
+    header_font = _report_font(size=10, bold=True, color=C_DARK_TEXT)
+    header_fill = _report_fill(C_COL_HDR_BG)
+    header_align = _report_align("left", "center")
+    header_border = _report_border(bottom=MED_REPORT_BLUE)
+    _set_report_cell(worksheet, "A8", fll=header_fill, brd=_report_border(left=THIN_REPORT_GRAY))
+    for coordinate, label in [("B8", "Company"), ("C8", "Job Title"), ("D8", "Date Detected"), ("E8", "Apply")]:
+        _set_report_cell(
+            worksheet,
+            coordinate,
+            value=label,
+            fnt=header_font,
+            fll=header_fill,
+            aln=header_align,
+            brd=header_border,
+        )
+    _set_report_cell(worksheet, "F8", fll=header_fill, brd=_report_border(right=THIN_REPORT_GRAY))
+
+    for index, job in enumerate(jobs):
+        row = 9 + index
+        worksheet.row_dimensions[row].height = 24
+        row_border = _report_border(top=MED_REPORT_BLUE, bottom=HAIR_REPORT_LIGHT)
+        _set_report_cell(worksheet, f"A{row}", fll=_report_fill(C_DATA_SIDE_BG), brd=_report_border(left=THIN_REPORT_GRAY))
+        _set_report_cell(
+            worksheet,
+            f"B{row}",
+            value=job["company"],
+            fnt=_report_font(size=10, bold=True, color=C_DARK_TEXT),
+            fll=_report_fill(C_DATA_BG),
+            aln=_report_align("left", "center"),
+            brd=row_border,
+        )
+        _set_report_cell(
+            worksheet,
+            f"C{row}",
+            value=job["job_title"],
+            fnt=_report_font(size=10, color=C_DARK_TEXT),
+            fll=_report_fill(C_DATA_BG),
+            aln=_report_align("left", "center"),
+            brd=row_border,
+        )
+        _set_report_cell(
+            worksheet,
+            f"D{row}",
+            value=job["date_detected"],
+            fnt=_report_font(size=9, color=C_DATE_TEXT),
+            fll=_report_fill(C_DATA_BG),
+            aln=_report_align("left", "center"),
+            brd=row_border,
+        )
+        apply_cell = worksheet[f"E{row}"]
+        apply_cell.value = "View vacancy →"
+        apply_cell.font = _report_font(size=9, underline=True, color=C_LINK)
+        apply_cell.fill = _report_fill(C_DATA_BG)
+        apply_cell.alignment = _report_align("left", "center")
+        apply_cell.border = row_border
+        if job["apply_url"]:
+            apply_cell.hyperlink = job["apply_url"]
+        _set_report_cell(worksheet, f"F{row}", fll=_report_fill(C_DATA_SIDE_BG), brd=_report_border(right=THIN_REPORT_GRAY))
+
+    post_row = 9 + len(jobs)
+    worksheet.row_dimensions[post_row].height = 13.55
+    _set_report_cell(worksheet, f"A{post_row}", brd=_report_border(left=THIN_REPORT_GRAY))
+    for column in "BCDE":
+        _set_report_cell(worksheet, f"{column}{post_row}", brd=_report_border(top=HAIR_REPORT_LIGHT))
+    _set_report_cell(worksheet, f"F{post_row}", brd=_report_border(right=THIN_REPORT_GRAY))
+
+    spacer_row = post_row + 1
+    worksheet.row_dimensions[spacer_row].height = 10
+    _set_report_cell(worksheet, f"A{spacer_row}", brd=_report_border(left=THIN_REPORT_GRAY))
+    _set_report_cell(worksheet, f"F{spacer_row}", brd=_report_border(right=THIN_REPORT_GRAY))
+
+    footer_row = spacer_row + 1
+    worksheet.row_dimensions[footer_row].height = 28
+    footer_text = (
+        f"This report was automatically generated by the {branding} Hiring Signal Agent"
+        "  ·  Reply to find out how this could work for your desk"
+    )
+    _set_report_cell(worksheet, f"A{footer_row}", fll=_report_fill(C_FOOTER_BG), brd=_report_border(left=THIN_REPORT_GRAY, bottom=THIN_REPORT_GRAY))
+    worksheet.merge_cells(f"B{footer_row}:E{footer_row}")
+    _set_report_cell(
+        worksheet,
+        f"B{footer_row}",
+        value=footer_text,
+        fnt=_report_font(size=8, italic=True, color=C_FOOTER_TEXT),
+        fll=_report_fill(C_FOOTER_BG),
+        aln=_report_align("center", "center"),
+        brd=_report_border(bottom=THIN_REPORT_GRAY),
+    )
+    for column in "CDE":
+        _set_report_cell(worksheet, f"{column}{footer_row}", fll=_report_fill(C_FOOTER_BG), brd=_report_border(bottom=THIN_REPORT_GRAY))
+    _set_report_cell(worksheet, f"F{footer_row}", fll=_report_fill(C_FOOTER_BG), brd=_report_border(right=THIN_REPORT_GRAY, bottom=THIN_REPORT_GRAY))
+
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
 
 
 def _build_career_outcome_reason_with_pagination(career_overview: dict[str, Any]) -> str | None:
@@ -412,24 +723,18 @@ def build_process_csv_attachments(process: dict[str, Any]) -> list[EmailAttachme
 
 
 def build_alert_jobs_csv_attachment(alert: dict[str, Any]) -> EmailAttachment:
+    return build_alert_jobs_report_attachment(alert)
+
+
+def build_alert_jobs_report_attachment(alert: dict[str, Any]) -> EmailAttachment:
     client = dict(alert.get("client") or {})
     period_type = str(alert.get("period_type") or "daily").strip() or "daily"
-    rows = [
-        {
-            "Company": job.get("registered_domain"),
-            "Job Title": job.get("title"),
-            "Date Detected": _format_report_datetime(job.get("first_seen_at")),
-            "Apply URL": job.get("job_url"),
-            "Source URL": job.get("source_url"),
-        }
-        for job in list(alert.get("jobs_after_filter") or [])
-    ]
     client_name = _safe_filename(str(client.get("client_name") or "client"))
     alert_id = _safe_filename(str(alert.get("alert_id") or "alert"))
     return EmailAttachment(
-        filename=f"{period_type}_new_jobs_{client_name}_{alert_id}.csv",
-        content=_csv_content(rows, ALERT_JOBS_CSV_FIELDS).encode(),
-        content_type="text/csv",
+        filename=f"{period_type}_hiring_signal_report_{client_name}_{alert_id}.xlsx",
+        content=_build_alert_jobs_xlsx(alert),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 
