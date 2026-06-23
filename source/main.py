@@ -44,7 +44,10 @@ async def index() -> RedirectResponse:
 
 @app.get("/admin", include_in_schema=False)
 async def admin_ui() -> FileResponse:
-    return FileResponse(STATIC_DIR / "admin.html")
+    return FileResponse(
+        STATIC_DIR / "admin.html",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
 
 
 @app.on_event("shutdown")
