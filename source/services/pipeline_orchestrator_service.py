@@ -412,8 +412,10 @@ class PipelineOrchestratorService:
 
     def _should_run_search(self, process: dict[str, Any]) -> bool:
         totals = process.get("totals") or {}
-        if process.get("status") == "running" or int(totals.get("processing") or 0) > 0:
+        if int(totals.get("processing") or 0) > 0:
             return False
+        if int(totals.get("queued") or 0) > 0:
+            return True
         if process.get("status") not in {"completed", "partial_completed"}:
             return True
         last_run = self._as_datetime(process.get("pipeline_last_search_at") or process.get("updated_at"))
