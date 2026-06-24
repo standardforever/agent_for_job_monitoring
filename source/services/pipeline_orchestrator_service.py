@@ -23,6 +23,7 @@ from utils.logging import get_logger, log_event
 logger = get_logger("pipeline_orchestrator_service")
 
 PIPELINE_RUNNING = "running"
+PIPELINE_QUEUED = "queued"
 PIPELINE_COMPLETED = "completed"
 PIPELINE_FAILED = "failed"
 PIPELINE_PAUSED = "paused"
@@ -215,7 +216,7 @@ class PipelineOrchestratorService:
     def _due_filter(self) -> dict[str, Any]:
         return {
             "pipeline_enabled": True,
-            "pipeline_status": {"$ne": PIPELINE_RUNNING},
+            "pipeline_status": {"$nin": [PIPELINE_QUEUED, PIPELINE_RUNNING]},
             "$or": [
                 {"next_pipeline_run_at": {"$exists": False}},
                 {"next_pipeline_run_at": None},
@@ -239,7 +240,7 @@ class PipelineOrchestratorService:
         return process.get("pipeline_enabled") is not False
 
     def _is_pipeline_active(self, process: dict[str, Any]) -> bool:
-        return process.get("pipeline_status") == PIPELINE_RUNNING
+        return process.get("pipeline_status") in {PIPELINE_QUEUED, PIPELINE_RUNNING}
 
     def _create_run(self, process: dict[str, Any], *, trigger: str, force: bool) -> dict[str, Any]:
         timestamp = _now()
@@ -247,13 +248,12 @@ class PipelineOrchestratorService:
             "pipeline_run_id": uuid4().hex,
             "process_id": process["process_id"],
             "client": process.get("client") or {},
-            "status": PIPELINE_RUNNING,
+            "status": PIPELINE_QUEUED,
             "trigger": trigger,
             "force": force,
             "stages": {},
-            "started_at": timestamp,
+            "queued_at": timestamp,
             "updated_at": timestamp,
-            "heartbeat_at": timestamp,
         }
         self._pipeline_runs.insert_one(run)
         return run
@@ -264,14 +264,13 @@ class PipelineOrchestratorService:
             {
                 "$set": {
                     "pipeline_enabled": True,
-                    "pipeline_status": PIPELINE_RUNNING,
+                    "pipeline_status": PIPELINE_QUEUED,
                     "pipeline_current_run_id": pipeline_run_id,
                     "pipeline_trigger": trigger,
-                    "pipeline_started_at": _now(),
-                    "pipeline_heartbeat_at": _now(),
+                    "pipeline_queued_at": _now(),
                     "updated_at": _now(),
                 },
-                "$unset": {"pipeline_last_error": ""},
+                "$unset": {"pipeline_started_at": "", "pipeline_heartbeat_at": "", "pipeline_last_error": ""},
             },
         )
 
@@ -281,9 +280,30 @@ class PipelineOrchestratorService:
         run_pipeline_process.apply_async(args=[pipeline_run_id], queue="pipeline")
 
     def _attach_worker_run(self, pipeline_run_id: str, celery_task_id: str | None) -> None:
+        run = self._load_run(pipeline_run_id)
+        timestamp = _now()
         self._pipeline_runs.update_one(
             {"pipeline_run_id": pipeline_run_id},
-            {"$set": {"celery_task_id": celery_task_id, "updated_at": _now(), "heartbeat_at": _now()}},
+            {
+                "$set": {
+                    "status": PIPELINE_RUNNING,
+                    "celery_task_id": celery_task_id,
+                    "started_at": timestamp,
+                    "updated_at": timestamp,
+                    "heartbeat_at": timestamp,
+                }
+            },
+        )
+        self._processes.update_one(
+            {"process_id": run["process_id"]},
+            {
+                "$set": {
+                    "pipeline_status": PIPELINE_RUNNING,
+                    "pipeline_started_at": timestamp,
+                    "pipeline_heartbeat_at": timestamp,
+                    "updated_at": timestamp,
+                }
+            },
         )
 
     def _run_stage(self, pipeline_run_id: str, stage: str, action: Callable[[], dict[str, Any]]) -> None:
