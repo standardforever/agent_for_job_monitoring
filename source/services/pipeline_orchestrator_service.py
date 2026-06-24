@@ -169,7 +169,8 @@ class PipelineOrchestratorService:
         run = self._load_run(pipeline_run_id)
         process_id = str(run["process_id"])
         try:
-            self._attach_worker_run(pipeline_run_id, celery_task_id)
+            if not self._attach_worker_run(pipeline_run_id, celery_task_id):
+                return {"status": "ignored", "pipeline_run_id": pipeline_run_id, "reason": "run_not_queued"}
             self._run_stage(pipeline_run_id, "search", lambda: self._maybe_run_search(process_id))
             self._run_stage(pipeline_run_id, "category", lambda: self._maybe_run_category(process_id))
             self._run_stage(pipeline_run_id, "pattern", lambda: self._maybe_run_pattern(process_id))
@@ -279,11 +280,11 @@ class PipelineOrchestratorService:
 
         run_pipeline_process.apply_async(args=[pipeline_run_id], queue="pipeline")
 
-    def _attach_worker_run(self, pipeline_run_id: str, celery_task_id: str | None) -> None:
+    def _attach_worker_run(self, pipeline_run_id: str, celery_task_id: str | None) -> bool:
         run = self._load_run(pipeline_run_id)
         timestamp = _now()
-        self._pipeline_runs.update_one(
-            {"pipeline_run_id": pipeline_run_id},
+        updated = self._pipeline_runs.find_one_and_update(
+            {"pipeline_run_id": pipeline_run_id, "status": PIPELINE_QUEUED},
             {
                 "$set": {
                     "status": PIPELINE_RUNNING,
@@ -293,7 +294,19 @@ class PipelineOrchestratorService:
                     "heartbeat_at": timestamp,
                 }
             },
+            return_document=ReturnDocument.AFTER,
         )
+        if not updated:
+            log_event(
+                logger,
+                "warning",
+                "pipeline_run_ignored_not_queued",
+                domain="pipeline",
+                pipeline_run_id=pipeline_run_id,
+                process_id=run.get("process_id"),
+                current_status=run.get("status"),
+            )
+            return False
         self._processes.update_one(
             {"process_id": run["process_id"]},
             {
@@ -305,6 +318,7 @@ class PipelineOrchestratorService:
                 }
             },
         )
+        return True
 
     def _run_stage(self, pipeline_run_id: str, stage: str, action: Callable[[], dict[str, Any]]) -> None:
         self._stage_started(pipeline_run_id, stage)
